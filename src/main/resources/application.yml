@@ -1,0 +1,16 @@
+ledger:
+  fee-rate: 310
+spring:
+  threads:
+    virtual:
+      enabled: true
+  datasource:
+    url: jdbc:postgresql://localhost:5433/ledger
+    username: postgres
+    password: password
+  jpa:
+    hibernate:
+      ddl-auto: update
+  sql:
+    init:
+      mode: always
