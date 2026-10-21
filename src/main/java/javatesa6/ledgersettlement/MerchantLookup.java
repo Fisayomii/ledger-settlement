@@ -1,23 +1,26 @@
 package javatesa6.ledgersettlement;
 
+import java.net.URI;
 import java.util.Map;
 
 /**
- * Merchant status table from the merchant directory, loaded once when the bean is created.
+ * SJV-L1 scenario 6 - planted defect. The merchant table is now fetched from the merchant directory
+ * inside the class initializer, so the first request that touches this class makes the downstream
+ * HTTP call while running <clinit>, and every other request needing the class waits for it.
  */
 public final class MerchantLookup {
 
-    private final Map<String, String> table;
+    static final Map<String, String> TABLE;
 
-    public MerchantLookup(MerchantDirectoryClient directory) {
-        this.table = Map.copyOf(directory.fetchTable());
+    static {
+        String url = System.getProperty(HttpMerchantDirectoryClient.URL_PROPERTY, HttpMerchantDirectoryClient.DEFAULT_URL);
+        TABLE = new HttpMerchantDirectoryClient(URI.create(url)).fetchTable();
     }
 
-    public Map<String, String> table() {
-        return table;
+    private MerchantLookup() {
     }
 
-    public String statusOf(String merchantId) {
-        return table.get(merchantId);
+    public static String statusOf(String merchantId) {
+        return TABLE.get(merchantId);
     }
 }

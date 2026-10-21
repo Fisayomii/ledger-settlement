@@ -9,14 +9,11 @@ import java.util.List;
 @Service
 public class SettlementService {
     private final PaymentRepository repository;
-    private final MerchantLookup merchantLookup;
     private final int feeRateBasisPoints;
 
     public SettlementService(PaymentRepository repository,
-                             MerchantLookup merchantLookup,
                              @Value("${ledger.fee-rate:310}") int feeRateBasisPoints) {
         this.repository = repository;
-        this.merchantLookup = merchantLookup;
         this.feeRateBasisPoints = feeRateBasisPoints;
     }
 
@@ -30,7 +27,7 @@ public class SettlementService {
         if (payments.isEmpty()) {
             throw new MerchantNotFoundException(merchantId);
         }
-        if (!"ACTIVE".equals(merchantLookup.statusOf(merchantId))) {
+        if (!"ACTIVE".equals(MerchantLookup.statusOf(merchantId))) {
             throw new MerchantNotFoundException(merchantId);
         }
 

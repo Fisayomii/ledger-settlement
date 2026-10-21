@@ -14,9 +14,4 @@ public class MerchantConfig {
             @Value("${" + HttpMerchantDirectoryClient.URL_PROPERTY + ":" + HttpMerchantDirectoryClient.DEFAULT_URL + "}") String url) {
         return new HttpMerchantDirectoryClient(URI.create(url));
     }
-
-    @Bean
-    public MerchantLookup merchantLookup(MerchantDirectoryClient merchantDirectoryClient) {
-        return new MerchantLookup(merchantDirectoryClient);
-    }
 }
