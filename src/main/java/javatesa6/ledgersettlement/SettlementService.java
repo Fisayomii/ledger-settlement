@@ -1,18 +1,22 @@
 package javatesa6.ledgersettlement;
 
-
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
+
 import java.util.List;
 
 @Service
 public class SettlementService {
     private final PaymentRepository repository;
+    private final MerchantLookup merchantLookup;
     private final int feeRateBasisPoints;
 
-    public SettlementService(PaymentRepository repository, @Value("${ledger.fee-rate:310}") int feeRateBasisPoints) {
+    public SettlementService(PaymentRepository repository,
+                             MerchantLookup merchantLookup,
+                             @Value("${ledger.fee-rate:310}") int feeRateBasisPoints) {
         this.repository = repository;
+        this.merchantLookup = merchantLookup;
         this.feeRateBasisPoints = feeRateBasisPoints;
     }
 
@@ -24,6 +28,9 @@ public class SettlementService {
     public long calculateSettlement(String merchantId) {
         List<PaymentEntity> payments = repository.findByMerchantId(merchantId);
         if (payments.isEmpty()) {
+            throw new MerchantNotFoundException(merchantId);
+        }
+        if (!"ACTIVE".equals(merchantLookup.statusOf(merchantId))) {
             throw new MerchantNotFoundException(merchantId);
         }
 

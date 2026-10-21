@@ -1,0 +1,26 @@
+ledger:
+  fee-rate: 310
+  merchant-directory:
+    url: http://localhost:9090
+server:
+  tomcat:
+    # Request-handling pool that serves /payments/settlement before SJV-L1.
+    # These are the Spring Boot defaults, written out so they can be found by file and line.
+    threads:
+      max: 200
+      min-spare: 10
+    accept-count: 100
+    max-connections: 8192
+spring:
+  datasource:
+    url: jdbc:postgresql://localhost:5433/ledger
+    username: postgres
+    password: password
+    hikari:
+      maximum-pool-size: 10   # HikariCP default, written out because it bounds concurrent queries
+  jpa:
+    hibernate:
+      ddl-auto: update
+  sql:
+    init:
+      mode: always
