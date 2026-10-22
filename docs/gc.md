@@ -187,18 +187,121 @@ long gross = totals.grossMinor();
 
 ### Commands, as executed
 <!-- BEGIN:tuned-commands -->
+```text
+baseline-2 (in the gc-baseline build): java -jar target/ledger-settlement.jar
+baseline-2: k6 run -e PHASE=warmup perf/steady-load.js
+baseline-2: jcmd 27952 JFR.start name=gc duration=10m filename=gc-baseline-2.jfr settings=profile
+baseline-2: k6 run --summary-export target/sjv-l2/runs/baseline-2.k6-summary.json perf/steady-load.js
+tuned-2 (in the gc-tuned build): java -jar target/ledger-settlement.jar
+tuned-2: k6 run -e PHASE=warmup perf/steady-load.js
+tuned-2: jcmd 4680 JFR.start name=gc duration=10m filename=gc-tuned-2.jfr settings=profile
+tuned-2: k6 run --summary-export target/sjv-l2/runs/tuned-2.k6-summary.json perf/steady-load.js
+```
 <!-- END:tuned-commands -->
 
 ### The four tuned numbers
 <!-- BEGIN:tuned-numbers -->
+From `gc-tuned.jfr` (600 s recording, collector G1New/G1Old):
+
+| Measure | Value | JDK Mission Control view |
+| :--- | ---: | :--- |
+| Total allocation rate | 5.16 MB/s (3095 MB in 600 s) | Memory → Allocation (sum of `jdk.ObjectAllocationSample` weights) |
+| Top three allocating classes | byte[] (13.3 %); Object[] (8.1 %); java.util.LinkedHashMap (4.4 %) | Memory → Allocation → by class |
+| Collection count | 83 (59 young, 24 mixed/old) | Garbage Collections (one row per collection) |
+| Longest pause | 14.93 ms as recorded | Garbage Collections → Longest Pause column |
+
+**How the figures were checked.** The allocation total leaves out each thread's first sample (696 MB): a sample's weight is everything its thread allocated since its previous sample, so the first one also carries the start-up and warm-up. Independently, heap growth between consecutive collections gives 5.16 MB/s. `jfr print --events jdk.GarbageCollection gc-tuned.jfr` lists 83 collections, and the longest single `jdk.GCPhasePause` is 14.93 ms. Total pause time 483.7 ms (0.081 % of the run). JFR's clock on this machine ran 1.19× fast (the 600 s recording spans 711 s of JFR timestamps), so every JFR duration, in JDK Mission Control too, reads 1.19× long: the real longest pause is about 12.6 ms. Both sides of any comparison carry the same factor. Load in the same window (k6): 300.0 req/s, p99 6.75 ms, failed 0.000 %, dropped iterations 0.
 <!-- END:tuned-numbers -->
 
 ### Allocation profile and steady state (tuned run 1)
 <!-- BEGIN:tuned-detail -->
+```text
+Recording 600 s (jfr summary). Allocation 3094.8 MB = 5.16 MB/s; each thread's first sample (696.1 MB, allocated before the recording started) is left out.
+Cross-check: heap growth between consecutive collections 3093.3 MB = 5.16 MB/s.
+Whole machine CPU (all processes, jdk.CPULoad machineTotal): average 45.1 %, highest 97.8 %; this JVM: 5.6 %.
+JFR clock: the 600 s recording spans 711 s of JFR time (569 one-per-second jdk.CPULoad samples), factor 1.185 (1.000 = accurate; JFR durations below are as recorded).
+
+Top allocating classes:
+   13.3 %  byte[]
+    8.1 %  Object[]
+    4.4 %  java.util.LinkedHashMap
+    3.2 %  java.lang.String
+    3.2 %  java.util.HashMap$Node[]
+    3.1 %  java.util.concurrent.ConcurrentHashMap$Node
+    2.3 %  java.util.ArrayList
+    2.2 %  org.springframework.core.ResolvableType
+    2.2 %  java.util.LinkedHashMap$Entry
+    2.1 %  java.util.concurrent.ConcurrentHashMap
+
+Top allocation sites (frame where the object was created):
+    3.2 %  java.util.HashMap.resize:711
+    2.8 %  java.util.Arrays.copyOf:3537
+    2.7 %  java.lang.invoke.DirectMethodHandle.allocateInstance:500
+    2.6 %  java.util.concurrent.ConcurrentHashMap.putVal:1031
+    2.6 %  jdk.internal.misc.Unsafe.allocateUninitializedArray:1396
+    2.3 %  java.util.concurrent.CopyOnWriteArrayList.toArray:338
+    2.2 %  java.util.LinkedHashMap.newNode:281
+    2.1 %  java.util.Arrays.copyOfRange:3849
+    2.0 %  java.util.ArrayList.grow:240
+    1.8 %  org.springframework.core.ResolvableType.forType:1533
+    1.8 %  org.springframework.web.context.request.AbstractRequestAttributes.<init>:36
+    1.8 %  org.springframework.web.context.request.ServletRequestAttributes.<init>:70
+    1.7 %  java.nio.HeapByteBuffer.<init>:75
+    1.2 %  java.time.Instant.create:416
+    1.0 %  org.hibernate.internal.SessionFactoryImpl$1.createSession:551
+
+First application frame on the allocating stack:
+   70.9 %  (no application frame on the stack)
+   28.6 %  javatesa6.ledgersettlement.SettlementService.calculateSettlement:27
+    0.4 %  javatesa6.ledgersettlement.SettlementService$$SpringCGLIB$$0.calculateSettlement
+    0.1 %  javatesa6.ledgersettlement.PaymentController.getSettlement:51
+
+What javatesa6.ledgersettlement.SettlementService.calculateSettlement:27 allocated, by layer (share of that call, share of all):
+   25.7 %    7.4 %  other Hibernate (session, JDBC coordination)
+   25.2 %    7.2 %  query creation and parameter binding
+   21.7 %    6.2 %  JDBC driver (PgJDBC)
+   14.8 %    4.2 %  Spring transaction and repository proxy
+    8.2 %    2.4 %  Hibernate entity loading and persistence context
+    2.3 %    0.7 %  Hikari connection checkout
+    2.1 %    0.6 %  other
+
+Tenths of the recording (alloc MB/s, collections, longest pause ms, avg heap after GC MB):
+ 1: 5.14 MB/s, 8 GCs, 14.93 ms, 37.7 MB
+ 2: 5.17 MB/s, 8 GCs, 11.59 ms, 37.5 MB
+ 3: 5.15 MB/s, 8 GCs, 11.79 ms, 37.3 MB
+ 4: 5.17 MB/s, 8 GCs, 9.55 ms, 36.9 MB
+ 5: 5.15 MB/s, 8 GCs, 11.75 ms, 36.8 MB
+ 6: 5.17 MB/s, 8 GCs, 8.89 ms, 36.6 MB
+ 7: 5.17 MB/s, 9 GCs, 7.00 ms, 36.6 MB
+ 8: 5.15 MB/s, 8 GCs, 5.22 ms, 36.2 MB
+ 9: 5.16 MB/s, 9 GCs, 7.30 ms, 36.5 MB
+10: 5.15 MB/s, 9 GCs, 6.07 ms, 36.7 MB
+```
 <!-- END:tuned-detail -->
 
 ## 6. Baseline versus tuned
 <!-- BEGIN:comparison -->
+Each cell: mean of the runs, every run in brackets. Change counts only when it is larger than the run-to-run spread (highest minus lowest run) inside either side; otherwise it is marked *within noise*.
+
+| Measure | Baseline | Tuned | Change |
+| :--- | :--- | :--- | :--- |
+| Allocation rate (MB/s) | 6.22 (6.20, 6.23) | 5.16 (5.16, 5.16) | -17.0 % (better) |
+| Collection count (10 min) | 124 (107, 140) | 86 (83, 89) | -30.4 % (better) |
+| Longest pause (ms) | 14.64 (16.54, 12.74) | 17.92 (14.93, 20.91) | +22.4 % (within noise) |
+| p99 request latency (ms) | 6.19 (5.36, 7.01) | 6.80 (6.75, 6.85) | +9.9 % (within noise) |
+| Throughput (req/s; held at 300 by the arrival rate) | 299.9 (299.9, 299.9) | 300.0 (300.0, 300.0) | +0.0 % (better) |
+| Dropped iterations (rate not met) | 27 (53, 0) | 0 (0, 0) | -100.0 % (within noise) |
+| Total GC pause time (ms) | 546.2 (325.6, 766.8) | 483.7 (483.7, 483.7) | -11.4 % (within noise) |
+| p50 / p95 latency (ms) | 3.10 / 4.42 | 3.91 / 5.95 | +25.8 % (within noise) / +34.6 % (within noise) |
+| Heap after GC, average (MB) | 35.7 (37.0, 34.3) | 37.4 (36.9, 37.8) | +4.8 % (within noise) |
+| Heap committed, max (MB) | 88.6 (97.5, 79.7) | 96.5 (97.5, 95.4) | +8.9 % (within noise) |
+| Resident set size, max (MB) | 351.9 (361.7, 342.0) | 368.8 (372.5, 365.0) | +4.8 % (within noise) |
+| JVM CPU (% of machine) | 4.6 (2.8, 6.3) | 5.2 (5.6, 4.7) | +13.4 % (within noise) |
+| Whole machine CPU, all processes (%) | 35.8 (24.8, 46.8) | 40.4 (45.1, 35.7) | +12.8 % (within noise) |
+| Start-up until serving (s) | 14.5 (12.5, 16.4) | 20.2 (16.9, 23.6) | +39.9 % (within noise) |
+| Failed requests (%) | 0.000 (0.000, 0.000) | 0.000 (0.000, 0.000) | n/a |
+
+`amountOwedMinor` returned: baseline 125438–125438, tuned 125438–125438. No run stalled.
 <!-- END:comparison -->
 
 ## 7. The trade
