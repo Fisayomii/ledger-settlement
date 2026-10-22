@@ -763,8 +763,10 @@ public class GcLab {
             var kernel32 = java.lang.foreign.SymbolLookup.libraryLookup("kernel32", java.lang.foreign.Arena.global());
             var setState = linker.downcallHandle(kernel32.find("SetThreadExecutionState").orElseThrow(),
                     java.lang.foreign.FunctionDescriptor.of(java.lang.foreign.ValueLayout.JAVA_INT, java.lang.foreign.ValueLayout.JAVA_INT));
-            int previous = (int) setState.invokeExact(0x80000000 | 0x00000001);
-            System.out.println(previous != 0 ? "Windows will not sleep while the lab runs (keep the lid open)."
+            // ES_CONTINUOUS | ES_SYSTEM_REQUIRED | ES_DISPLAY_REQUIRED: on Modern Standby laptops a screen timeout alone
+            // sends the machine into standby, so the display must be kept on too.
+            int previous = (int) setState.invokeExact(0x80000000 | 0x00000001 | 0x00000002);
+            System.out.println(previous != 0 ? "Windows will keep the machine and the screen awake while the lab runs (keep the lid open)."
                     : "WARNING: Windows did not accept the keep-awake request; set Sleep to Never while this runs.");
         } catch (Throwable t) {
             System.out.println("WARNING: could not keep Windows awake (" + t + "); set Sleep to Never while this runs.");
