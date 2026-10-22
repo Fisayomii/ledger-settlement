@@ -4,8 +4,6 @@ import org.springframework.beans.factory.annotation.Value;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
-import java.util.List;
-
 @Service
 public class SettlementService {
     private final PaymentRepository repository;
@@ -26,15 +24,15 @@ public class SettlementService {
     }
 
     public long calculateSettlement(String merchantId) {
-        List<PaymentEntity> payments = repository.findByMerchantId(merchantId);
-        if (payments.isEmpty()) {
+        MerchantTotals totals = repository.totalsForMerchant(merchantId);
+        if (totals.paymentCount() == 0) {
             throw new MerchantNotFoundException(merchantId);
         }
         if (!"ACTIVE".equals(merchantLookup.statusOf(merchantId))) {
             throw new MerchantNotFoundException(merchantId);
         }
 
-        long gross = payments.stream().mapToLong(PaymentEntity::getAmountMinor).sum();
+        long gross = totals.grossMinor();
         long fee = gross * feeRateBasisPoints / 10000;
         return gross - fee;
     }
