@@ -48,72 +48,83 @@ baseline-1: k6 run --summary-export target/sjv-l2/runs/baseline-1.k6-summary.jso
 
 ### The four baseline numbers
 <!-- BEGIN:baseline-numbers -->
-From `gc-baseline.jfr` (711 s recording, collector G1New/G1Old):
+From `gc-baseline.jfr` (600 s recording, collector G1New/G1Old):
 
 | Measure | Value | JDK Mission Control view |
 | :--- | ---: | :--- |
-| Total allocation rate | 6.48 MB/s (4610 MB in 711 s) | Memory → Allocation (total of `jdk.ObjectAllocationSample` weights) |
-| Top three allocating classes | java.time.Instant (13.8 %); byte[] (12.3 %); Object[] (7.8 %) | Memory → Allocation → by class |
+| Total allocation rate | 6.20 MB/s (3719 MB in 600 s) | Memory → Allocation (sum of `jdk.ObjectAllocationSample` weights) |
+| Top three allocating classes | byte[] (14.5 %); Object[] (9.6 %); java.lang.String (3.2 %) | Memory → Allocation → by class |
 | Collection count | 107 (73 young, 34 mixed/old) | Garbage Collections (one row per collection) |
-| Longest pause | 16.54 ms | Garbage Collections → Longest Pause column |
+| Longest pause | 16.54 ms as recorded | Garbage Collections → Longest Pause column |
 
-Cross-check with the JDK's `jfr` tool: `jfr print --events jdk.GarbageCollection gc-baseline.jfr` lists 107 collections, and the longest single `jdk.GCPhasePause` is 16.54 ms. Total pause time 325.6 ms (0.046 % of the run). Load during the same window (k6): 299.9 req/s, p99 5.36 ms, failed 0.000 %, dropped iterations 53.
+**How the figures were checked.** The allocation total leaves out each thread's first sample (891 MB): a sample's weight is everything its thread allocated since its previous sample, so the first one also carries the start-up and warm-up. Independently, heap growth between consecutive collections gives 6.38 MB/s. `jfr print --events jdk.GarbageCollection gc-baseline.jfr` lists 107 collections, and the longest single `jdk.GCPhasePause` is 16.54 ms. Total pause time 325.6 ms (0.054 % of the run). JFR's clock on this machine ran 1.19× fast (the 600 s recording spans 711 s of JFR timestamps), so every JFR duration, in JDK Mission Control too, reads 1.19× long: the real longest pause is about 14.0 ms. Both sides of any comparison carry the same factor. Load in the same window (k6): 299.9 req/s, p99 5.36 ms, failed 0.000 %, dropped iterations 53.
 <!-- END:baseline-numbers -->
 
 ### Allocation profile and steady state (baseline run 1)
 <!-- BEGIN:baseline-detail -->
 ```text
-Recording 711.1 s, 4610.1 MB sampled allocation (jdk.ObjectAllocationSample weights)
+Recording 600 s (jfr summary). Allocation 3719.1 MB = 6.20 MB/s; each thread's first sample (891.0 MB, allocated before the recording started) is left out.
+Cross-check: heap growth between consecutive collections 3826.3 MB = 6.38 MB/s.
+Whole machine CPU (all processes, jdk.CPULoad machineTotal): average 24.8 %, highest 96.0 %; this JVM: 2.8 %.
+JFR clock: the 600 s recording spans 711 s of JFR time (582 one-per-second jdk.CPULoad samples), factor 1.185 (1.000 = accurate; JFR durations below are as recorded).
 
 Top allocating classes:
-   13.8 %  java.time.Instant
-   12.3 %  byte[]
-    7.8 %  Object[]
-    3.4 %  java.util.concurrent.ConcurrentHashMap
-    2.9 %  java.lang.String
-    2.2 %  java.nio.HeapByteBuffer
-    2.2 %  java.util.HashMap$Node[]
-    2.2 %  java.util.LinkedHashMap
-    1.9 %  java.util.concurrent.ConcurrentHashMap$Node
-    1.8 %  org.springframework.core.ResolvableType
+   14.5 %  byte[]
+    9.6 %  Object[]
+    3.2 %  java.lang.String
+    2.8 %  java.nio.HeapByteBuffer
+    2.7 %  java.util.HashMap$Node[]
+    2.7 %  java.util.LinkedHashMap
+    2.1 %  org.springframework.core.ResolvableType
+    2.0 %  java.nio.StringCharBuffer
+    2.0 %  java.util.concurrent.ConcurrentHashMap$Node
+    2.0 %  java.util.LinkedHashMap$Entry
 
 Top allocation sites (frame where the object was created):
-   13.8 %  java.time.Instant.create:416
-    3.2 %  org.springframework.web.context.request.ServletRequestAttributes.<init>:70
-    2.3 %  java.util.IdentityHashMap.init:266
-    2.3 %  java.util.Arrays.copyOf:3537
-    2.2 %  java.util.HashMap.resize:711
-    2.0 %  java.lang.invoke.DirectMethodHandle.allocateInstance:500
-    1.8 %  java.nio.HeapByteBuffer.<init>:75
-    1.7 %  jdk.internal.misc.Unsafe.allocateUninitializedArray:1396
-    1.6 %  java.nio.CharBuffer.wrap:552
+    2.9 %  java.util.IdentityHashMap.init:266
+    2.9 %  java.util.Arrays.copyOf:3537
+    2.7 %  java.util.HashMap.resize:711
+    2.4 %  java.lang.invoke.DirectMethodHandle.allocateInstance:500
+    2.1 %  jdk.internal.misc.Unsafe.allocateUninitializedArray:1396
+    2.0 %  java.nio.CharBuffer.wrap:552
+    2.0 %  java.nio.ByteBuffer.allocate:398
+    2.0 %  java.nio.HeapByteBuffer.<init>:75
+    2.0 %  java.util.LinkedHashMap.newNode:281
+    1.9 %  sun.nio.cs.ISO_8859_1.newEncoder:65
     1.6 %  java.util.concurrent.ConcurrentHashMap.putVal:1031
-    1.6 %  java.nio.ByteBuffer.allocate:398
-    1.6 %  java.util.LinkedHashMap.newNode:281
-    1.5 %  sun.nio.cs.ISO_8859_1.newEncoder:65
-    1.4 %  org.springframework.core.ResolvableType.forType:1533
-    1.3 %  java.util.Arrays.copyOfRange:3849
+    1.6 %  java.util.Arrays.copyOfRange:3849
+    1.6 %  sun.util.calendar.Gregorian.newCalendarDate:94
+    1.6 %  java.util.concurrent.CopyOnWriteArrayList.toArray:338
+    1.5 %  org.springframework.core.ResolvableType.forType:1533
 
 First application frame on the allocating stack:
-   66.6 %  (no application frame on the stack)
-   32.0 %  javatesa6.ledgersettlement.SettlementService.calculateSettlement:29
-    1.1 %  javatesa6.ledgersettlement.SettlementService.calculateSettlement:37
+   60.9 %  (no application frame on the stack)
+   37.5 %  javatesa6.ledgersettlement.SettlementService.calculateSettlement:29
+    1.3 %  javatesa6.ledgersettlement.SettlementService.calculateSettlement:37
     0.2 %  javatesa6.ledgersettlement.SettlementService$$SpringCGLIB$$0.calculateSettlement
-    0.1 %  javatesa6.ledgersettlement.PaymentController.getSettlement:51
+    0.2 %  javatesa6.ledgersettlement.PaymentController.getSettlement:51
     0.0 %  javatesa6.ledgersettlement.SettlementService$$SpringCGLIB$$0.recordPayment
 
-Per minute (minute: alloc MB/s, collections, longest pause ms, avg heap after GC MB):
- 1: 20.08 MB/s, 9 GCs, 7.98 ms, 37.5 MB
- 2: 5.21 MB/s, 8 GCs, 8.21 ms, 37.2 MB
- 3: 5.22 MB/s, 9 GCs, 7.44 ms, 37.0 MB
- 4: 5.24 MB/s, 9 GCs, 6.14 ms, 36.9 MB
- 5: 5.21 MB/s, 9 GCs, 3.06 ms, 36.9 MB
- 6: 5.24 MB/s, 9 GCs, 3.13 ms, 36.8 MB
- 7: 5.24 MB/s, 9 GCs, 3.45 ms, 37.1 MB
- 8: 5.23 MB/s, 9 GCs, 7.49 ms, 37.0 MB
- 9: 5.24 MB/s, 11 GCs, 5.90 ms, 37.0 MB
-10: 5.23 MB/s, 9 GCs, 7.35 ms, 37.0 MB
-11: 5.24 MB/s, 9 GCs, 11.37 ms, 37.1 MB
+What javatesa6.ledgersettlement.SettlementService.calculateSettlement:29 allocated, by layer (share of that call, share of all):
+   45.4 %   17.0 %  Hibernate entity loading and persistence context
+   15.7 %    5.9 %  JDBC driver (PgJDBC)
+   14.2 %    5.3 %  other Hibernate (session, JDBC coordination)
+   13.7 %    5.1 %  query creation and parameter binding
+    8.7 %    3.3 %  Spring transaction and repository proxy
+    1.3 %    0.5 %  Hikari connection checkout
+    0.9 %    0.4 %  other
+
+Tenths of the recording (alloc MB/s, collections, longest pause ms, avg heap after GC MB):
+ 1: 6.19 MB/s, 11 GCs, 8.21 ms, 37.5 MB
+ 2: 6.20 MB/s, 9 GCs, 7.44 ms, 37.0 MB
+ 3: 6.19 MB/s, 11 GCs, 7.01 ms, 37.0 MB
+ 4: 6.20 MB/s, 12 GCs, 3.06 ms, 36.9 MB
+ 5: 6.19 MB/s, 10 GCs, 3.13 ms, 36.8 MB
+ 6: 6.19 MB/s, 11 GCs, 3.45 ms, 37.0 MB
+ 7: 6.22 MB/s, 10 GCs, 7.49 ms, 37.0 MB
+ 8: 6.20 MB/s, 12 GCs, 5.90 ms, 37.0 MB
+ 9: 6.21 MB/s, 11 GCs, 11.37 ms, 37.0 MB
+10: 6.20 MB/s, 10 GCs, 16.54 ms, 37.3 MB
 ```
 <!-- END:baseline-detail -->
 
