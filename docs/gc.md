@@ -153,7 +153,37 @@ Tenths of the recording (alloc MB/s, collections, longest pause ms, avg heap aft
 **So the remedy is a code change at that site, not a flag.** Section 5 asks the database for the count and the sum instead of the rows. That removes the entity loading and the persistence-context bookkeeping per request, and leaves the query, JDBC and transaction layers in place.
 
 ## 5. Remedy
-*Follows from section 4.*
+**One code change, at the allocation site the profile names.** `SettlementService.calculateSettlement` now asks the database for the count and the sum instead of the rows:
+
+```java
+// PaymentRepository
+@Query("select new javatesa6.ledgersettlement.MerchantTotals(count(p), coalesce(sum(p.amountMinor), 0L)) "
+        + "from PaymentEntity p where p.merchantId = :merchantId")
+MerchantTotals totalsForMerchant(@Param("merchantId") String merchantId);
+
+// SettlementService.calculateSettlement, replacing findByMerchantId(...) and the stream sum
+MerchantTotals totals = repository.totalsForMerchant(merchantId);
+if (totals.paymentCount() == 0) throw new MerchantNotFoundException(merchantId);
+// merchant-status check unchanged
+long gross = totals.grossMinor();
+```
+
+**What stays the same.**
+- No `PaymentEntity` is loaded, so nothing enters the persistence context.
+- The result is unchanged: the same `long` minor units and the same fee arithmetic. An unknown merchant and an inactive merchant still give 404.
+- `SettlementServiceTest` pins this (124 469 for the 128 450 payment), and k6 records the amount returned by every request (section 6).
+
+**What changes, and what it should save.**
+- The launch command is identical: `java -jar target/ledger-settlement.jar`, with no JVM flag changed (`perf/gc-stages.properties`).
+- The only difference between baseline and tuned is this commit, tagged `gc-tuned`.
+- Expected effect: the 17 % of allocation that was entity loading goes away, so there should be fewer young collections. Pause length should not change, since it was never the problem.
+
+**Why this site and not another.**
+- It is the largest share of allocation that the application controls: 37.5 % below one call, 17 % in entity loading alone.
+- Everything else in the top sites is framework work per request (Tomcat buffers, Spring MVC `ResolvableType`, Jackson). Changing it would mean changing the framework, not the service.
+- The next application frame, line 37, is 1.3 %.
+- Disabling open-session-in-view (`spring.jpa.open-in-view`) would also trim allocation. But it is configuration that changes when the persistence context closes for every endpoint, and its share is smaller.
+- Heap and collector flags were ruled out in section 4.
 
 ### Commands, as executed
 <!-- BEGIN:tuned-commands -->
