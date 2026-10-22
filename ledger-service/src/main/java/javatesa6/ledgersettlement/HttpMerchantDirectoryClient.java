@@ -39,20 +39,25 @@ public final class HttpMerchantDirectoryClient implements MerchantDirectoryClien
             if (response.statusCode() != 200) {
                 throw new IllegalStateException("Merchant directory returned HTTP " + response.statusCode());
             }
-            Map<String, String> table = new LinkedHashMap<>();
-            response.body().lines()
-                    .map(String::strip)
-                    .filter(line -> !line.isEmpty())
-                    .forEach(line -> {
-                        int eq = line.indexOf('=');
-                        table.put(line.substring(0, eq), line.substring(eq + 1));
-                    });
-            return Map.copyOf(table);
+            return parseTable(response.body());
         } catch (IOException e) {
             throw new UncheckedIOException("Merchant directory unreachable at " + merchantsUri, e);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             throw new IllegalStateException("Interrupted while calling the merchant directory", e);
         }
+    }
+
+    /** Parses the directory's body, one "id=status" pair per line; blank lines are ignored. */
+    public static Map<String, String> parseTable(String body) {
+        Map<String, String> table = new LinkedHashMap<>();
+        body.lines()
+                .map(String::strip)
+                .filter(line -> !line.isEmpty())
+                .forEach(line -> {
+                    int eq = line.indexOf('=');
+                    table.put(line.substring(0, eq), line.substring(eq + 1));
+                });
+        return Map.copyOf(table);
     }
 }

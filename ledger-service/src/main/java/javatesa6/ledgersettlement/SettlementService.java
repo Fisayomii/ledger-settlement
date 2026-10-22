@@ -35,7 +35,15 @@ public class SettlementService {
         }
 
         long gross = payments.stream().mapToLong(PaymentEntity::getAmountMinor).sum();
-        long fee = gross * feeRateBasisPoints / 10000;
-        return gross - fee;
+        return owedMinor(gross, feeRateBasisPoints);
+    }
+
+    /**
+     * What the merchant is owed: the gross minus the fee, all in long minor units (no double, no rounding mode).
+     * The fee is truncated towards zero, so the merchant is never charged a fraction of a minor unit.
+     */
+    public static long owedMinor(long grossMinor, int feeRateBasisPoints) {
+        long fee = grossMinor * feeRateBasisPoints / 10000;
+        return grossMinor - fee;
     }
 }
