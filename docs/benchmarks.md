@@ -50,7 +50,7 @@ Every number in this document comes from `benchmarks/results.json`, the raw JMH 
 | `fixedReturnsResult`, fixed: result returned | 0.003886 ± 0.0003502 us/op | 0.000002713 ± 0.0000002445 B/op |
 | `fixedConsumesWithBlackhole`, fixed: result consumed by a Blackhole | 0.002705 ± 0.0008097 us/op | 0.00000189 ± 0.0000005652 B/op |
 
-The broken benchmark's interval overlaps the empty method's. Returning the result makes the measured time 6.22× the broken figure (0.003886 against 0.0006247 us/op), so the broken number understated the real cost by 83.92 %. The two fixes are distinguishable (their intervals do not overlap).
+The broken benchmark's interval overlaps the empty method's. Returning the result makes the measured time 6.22× the broken figure (0.003886 against 0.0006247 us/op), so the broken number understated the real cost by 83.92 %. The two fixes are inconclusive against each other: their intervals do not overlap, but the forks of each disagree more than the two differ (section 6).
 <!-- END:dce -->
 
 **What the JIT removed.**
@@ -78,19 +78,24 @@ The broken benchmark stays in the code, named as broken, so the error can be rep
 **Why forks matter:** each fork is a fresh JVM, so one run's JIT decisions and the profile it built up cannot skew the others. The spread between fork means below shows how far a single JVM could mislead.
 
 <!-- BEGIN:steadiness -->
-Per benchmark: the mean of each fork, and the largest drift inside any fork between its first three and last three measured iterations. Drift smaller than the error means the iterations had settled when measurement began.
-
-| Benchmark | Fork means | Fork spread | Largest drift in a fork | Error | Settled? |
-| :--- | :--- | ---: | ---: | ---: | :--- |
-| `LedgerHotPathBenchmark.calculateSettlement (payments=2)` | 0.04368, 0.0443, 0.04433 | 1.5 % | 4.1 % | 2.8 % | **no: drift exceeds the error** |
-| `LedgerHotPathBenchmark.calculateSettlement (payments=200)` | 0.2358, 0.2282, 0.2307 | 3.2 % | 18.3 % | 6.9 % | **no: drift exceeds the error** |
-| `LedgerHotPathBenchmark.parseMerchantDirectory` | 1083, 1087, 1029 | 5.4 % | 8.7 % | 3.1 % | **no: drift exceeds the error** |
-| `LedgerHotPathBenchmark.serialiseSettlementResponse` | 0.37, 0.3859, 0.3764 | 4.2 % | 2.6 % | 2.3 % | **no: drift exceeds the error** |
-| `SettlementArithmeticBenchmark.baseline` | 0.0005321, 0.0005915, 0.0005962 | 11.2 % | 15.4 % | 5.0 % | **no: drift exceeds the error** |
-| `SettlementArithmeticBenchmark.brokenDiscardsResult` | 0.0005998, 0.0005944, 0.0006797 | 13.6 % | 5.2 % | 4.8 % | **no: drift exceeds the error** |
-| `SettlementArithmeticBenchmark.fixedConsumesWithBlackhole` | 0.001216, 0.003399, 0.003499 | 84.4 % | 19.7 % | 29.9 % | yes |
-| `SettlementArithmeticBenchmark.fixedReturnsResult` | 0.003855, 0.00364, 0.004161 | 13.4 % | 20.7 % | 9.0 % | **no: drift exceeds the error** |
+| Benchmark | Fork means | Fork spread | First warm-up iteration, each fork (% of score) | Drift in each fork, last 3 vs first 3 measured | Reading |
+| :--- | :--- | ---: | :--- | :--- | :--- |
+| `LedgerHotPathBenchmark.calculateSettlement (payments=2)` | 0.04368, 0.0443, 0.04433 | 1.5 % | 100 %, 93 %, 93 % | -1.4 %, -4.1 %, -1.2 % | no common trend: iteration-to-iteration noise |
+| `LedgerHotPathBenchmark.calculateSettlement (payments=200)` | 0.2358, 0.2282, 0.2307 | 3.2 % | 82 %, 93 %, 92 % | +6.9 %, +18.3 %, -9.9 % | no common trend: iteration-to-iteration noise |
+| `LedgerHotPathBenchmark.parseMerchantDirectory` | 1083, 1087, 1029 | 5.4 % | 91 %, 93 %, 91 % | -8.7 %, -1.4 %, -0.9 % | no common trend: iteration-to-iteration noise |
+| `LedgerHotPathBenchmark.serialiseSettlementResponse` | 0.37, 0.3859, 0.3764 | 4.2 % | 95 %, 96 %, 96 % | +2.5 %, -2.6 %, +1.1 % | no common trend: iteration-to-iteration noise |
+| `SettlementArithmeticBenchmark.baseline` | 0.0005321, 0.0005915, 0.0005962 | 11.2 % | too small for the console's 3 decimals | +15.4 %, -2.5 %, +3.3 % | no common trend: iteration-to-iteration noise |
+| `SettlementArithmeticBenchmark.brokenDiscardsResult` | 0.0005998, 0.0005944, 0.0006797 | 13.6 % | too small for the console's 3 decimals | +5.2 %, -1.0 %, +2.8 % | no common trend: iteration-to-iteration noise |
+| `SettlementArithmeticBenchmark.fixedConsumesWithBlackhole` | 0.001216, 0.003399, 0.003499 | 84.4 % | too small for the console's 3 decimals | +1.4 %, +19.7 %, -10.0 % | no common trend: iteration-to-iteration noise |
+| `SettlementArithmeticBenchmark.fixedReturnsResult` | 0.003855, 0.00364, 0.004161 | 13.4 % | too small for the console's 3 decimals | -20.7 %, -9.4 %, +13.4 % | no common trend: iteration-to-iteration noise |
 <!-- END:steadiness -->
+
+**Reading this table.**
+- **The warm-up was long enough.**
+  - Where the console prints enough digits, the very first 10-second warm-up iteration of every fork already runs at 82–100 % of the final score. The JIT had compiled these methods within that first iteration.
+  - Inside the measured iterations, no benchmark gets faster in every fork. The drift changes sign from fork to fork (for example `calculateSettlement (payments=200)`: +6.9 %, +18.3 %, −9.9 %), which is iteration-to-iteration noise on a laptop whose clock speed varies, not unfinished warm-up.
+- **Forks matter, and this run shows why.** `fixedConsumesWithBlackhole` ran at 1.2 ns in fork 1 and at 3.4–3.5 ns in forks 2 and 3. The same code got different machine code in different JVMs. With `@Fork(1)`, whichever JVM happened to start would have decided the answer.
+- **Correcting my own first reading.** The first version of this table judged "settled" by comparing each fork's drift with JMH's error bar. That error bar is the uncertainty of the mean of all 30 samples, far tighter than the noise of three single iterations, so it flagged 7 of 8 benchmarks as unsettled. That conclusion was noise, and the table now tests what matters: the first warm-up iteration, and whether all forks drift the same way.
 
 ## 5. Results
 <!-- BEGIN:environment -->
@@ -129,23 +134,55 @@ Score ± error is JMH's 99.9 % confidence interval over 3 forks × 10 measured i
 <!-- END:results -->
 
 ## 6. Comparisons
-<!-- BEGIN:comparisons -->
-A comparison counts only when the two 99.9 % intervals do not overlap; otherwise it is marked **inconclusive**.
+Five comparisons were made, and two are inconclusive.
 
-| A | B | Intervals | Verdict |
-| :--- | :--- | :--- | :--- |
-| `brokenDiscardsResult` | `baseline` | [0.0005945, 0.0006548] vs [0.0005446, 0.000602] us/op | **inconclusive** (intervals overlap) |
-| `brokenDiscardsResult` | `fixedReturnsResult` | [0.0005945, 0.0006548] vs [0.003535, 0.004236] us/op | different: B takes 6.22× as long as A |
-| `fixedReturnsResult` | `fixedConsumesWithBlackhole` | [0.003535, 0.004236] vs [0.001895, 0.003514] us/op | different: A takes 1.437× as long as B |
-| `calculateSettlement (payments=2)` | `calculateSettlement (payments=200)` | [0.04288, 0.04533] vs [0.2155, 0.2476] us/op | different: B takes 5.251× as long as A |
-| `serialiseSettlementResponse` | `calculateSettlement (payments=2)` | [0.3687, 0.3861] vs [0.04288, 0.04533] us/op | different: A takes 8.558× as long as B |
+<!-- BEGIN:comparisons -->
+A comparison counts only when the two 99.9 % intervals do not overlap **and** the difference between the two scores is larger than the spread between fork means of either benchmark. JMH's interval treats all 30 iterations as independent; when forks of the same benchmark disagree more than the two benchmarks do, the difference is between JVMs, not between the methods. Otherwise the comparison is marked **inconclusive**.
+
+| A | B | Intervals | Fork-mean spread (A, B) | Verdict |
+| :--- | :--- | :--- | :--- | :--- |
+| `brokenDiscardsResult` | `baseline` | [0.0005945, 0.0006548] vs [0.0005446, 0.000602] us/op | 0.00008525, 0.00006403 | **inconclusive** (intervals overlap) |
+| `brokenDiscardsResult` | `fixedReturnsResult` | [0.0005945, 0.0006548] vs [0.003535, 0.004236] us/op | 0.00008525, 0.000521 | different: B takes 6.22× as long as A |
+| `fixedReturnsResult` | `fixedConsumesWithBlackhole` | [0.003535, 0.004236] vs [0.001895, 0.003514] us/op | 0.000521, 0.002282 | **inconclusive** (forks disagree more than the two benchmarks differ) |
+| `calculateSettlement (payments=2)` | `calculateSettlement (payments=200)` | [0.04288, 0.04533] vs [0.2155, 0.2476] us/op | 0.0006475, 0.007523 | different: B takes 5.251× as long as A |
+| `serialiseSettlementResponse` | `calculateSettlement (payments=2)` | [0.3687, 0.3861] vs [0.04288, 0.04533] us/op | 0.01586, 0.0006475 | different: A takes 8.558× as long as B |
 <!-- END:comparisons -->
 
+The first version of this rule looked only at interval overlap, and it called the return fix and the Blackhole fix "different": the return fix 1.44× slower. The intervals miss each other by 0.00002 µs. But the Blackhole benchmark's own forks differ by 0.0023 µs, more than the 0.0012 µs between the two fixes. That 1.44× was a difference between JVMs, so the rule now requires the gap to exceed the fork spread, and the comparison is reported as inconclusive.
+
 ## 7. Allocation, connected to the code
-*Written from the results above.*
+Bytes per operation are from `-prof gc` (`gc.alloc.rate.norm`) in the same run. The per-object figures below are estimates from object sizes on a 64-bit JVM with compressed references: a `String` is 24 bytes plus its `byte[]` of 16 bytes plus one byte per character, rounded up to 8.
+
+- **`parseMerchantDirectory`: 1 170 000 B per call, about 234 B per merchant line.** That matches what `HttpMerchantDirectoryClient.parseTable` creates for each line:
+  - `body.lines()` creates the line as a new `String` (about 56 B);
+  - `line.substring(0, eq)` creates the id (about 48 B);
+  - `line.substring(eq + 1)` creates the status (48–56 B);
+  - `table.put` adds a `LinkedHashMap` entry (40 B);
+  - `Map.copyOf(table)` copies every entry into a second, immutable table.
+
+  `strip()` allocates nothing here, because the lines have no surrounding spaces. The two `substring` calls are the largest share. They are what a parser of `id=status` lines has to produce, so the allocation is proportional to the directory, as expected.
+- **`calculateSettlement`: 200 B per call, the same for 2 and for 200 payments.**
+  - The allocation does not grow with the payments, so summing them allocates nothing per payment.
+  - The 200 B is the fixed cost of `payments.stream().mapToLong(PaymentEntity::getAmountMinor).sum()` in `SettlementService`: the stream's head, its `mapToLong` stage, the terminal reduce operation and its sink.
+  - A further 24 B or so is the argument array that the benchmark's in-memory repository (a `java.lang.reflect.Proxy`) builds for each call, which the real repository would not.
+- **`serialiseSettlementResponse`: 592 B per call.** About 96 B of it is the result itself, the 49-character JSON `String`. The rest is what `writeValueAsString` builds for every call: a generator and a string writer with its buffer. In the live service, Spring writes straight to the response stream rather than through a `String`, so the real figure is likely lower (see the limits).
+- **The fee arithmetic: about 0 B.** `owedMinor` works on two `long`s and allocates nothing. The 0.000002 B/op shown for the fixes is JMH's own bookkeeping spread over billions of operations.
 
 ## 8. Conclusions
-*Written from the results above.*
+1. **The broken benchmark measured nothing.**
+   - `brokenDiscardsResult` (0.000625 ± 0.000030 µs) cannot be told apart from an empty method (0.000573 ± 0.000029 µs).
+   - Returning the result shows the real cost: 0.00389 ± 0.00035 µs, 6.2× the broken figure.
+   - So the broken number understated the fee arithmetic by 84 %. It would have reported a real computation, a multiply, a divide and a subtract, as free.
+2. **Return and Blackhole are interchangeable here.** Their difference is inconclusive (section 6). Either fix is correct, and returning is simpler when there is one result.
+3. **The settlement calculation is cheap, and its cost grows with the number of payments, not its allocation.**
+   - 0.0441 ± 0.0012 µs for MR-4471's 2 payments, and 0.232 ± 0.016 µs for 200: about 0.95 ns per extra payment on top of about 0.042 µs fixed.
+   - At SJV-L2's 300 requests per second, even the 200-payment case is about 70 µs of CPU per second.
+   - Faster arithmetic or a different number type would not move the service. SJV-L2 found the cost under this call in Hibernate and the database, which is where its fix went.
+4. **Serialising the response costs 8.6× the calculation.** 0.377 ± 0.009 µs and 592 B, against 0.044 µs for MR-4471. That is still under half a microsecond per response, so neither is worth optimising at today's traffic.
+5. **Parsing the directory is the largest single cost measured:** 1 067 ± 33 µs and 1.17 MB for 5 000 merchants, about 0.21 µs and 234 B per merchant.
+   - It runs once at start-up, next to a merchant-directory call that takes about 3 s (SJV-L1), so it adds about 0.04 % to start-up.
+   - It would matter only if the table were refreshed often or the directory grew a hundredfold.
+6. **How far to trust these numbers.** On this laptop the real methods' forks agree within 1.5–5.4 %. The sub-nanosecond benchmarks vary 11–14 % between forks, and one varies 84 %. Differences of a few per cent between real methods should not be read from this suite. Every claim above is a factor of 5 or more, or is stated as inconclusive.
 
 ## 9. Limits: what this suite does not tell you
 

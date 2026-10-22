@@ -180,7 +180,11 @@ public class BenchLab {
                 + "Returning the result makes the measured time " + sig(ret.score / broken.score) + "× the broken figure ("
                 + sig(ret.score) + " against " + sig(broken.score) + " " + ret.unit + "), so the broken number understated "
                 + "the real cost by " + sig(100 * (ret.score - broken.score) / ret.score) + " %. The two fixes are "
-                + (overlap(ret, bh) ? "inconclusive against each other (their intervals overlap)." : "distinguishable (their intervals do not overlap).");
+                + (overlap(ret, bh) ? "inconclusive against each other (their intervals overlap)."
+                : Math.max(forkRange(ret), forkRange(bh)) >= Math.abs(ret.score - bh.score)
+                ? "inconclusive against each other: their intervals do not overlap, but the forks of each disagree more "
+                  + "than the two differ (section 6)."
+                : "distinguishable (their intervals do not overlap).");
     }
 
     static String row(Result r, String what) {
@@ -196,42 +200,100 @@ public class BenchLab {
                 {"LedgerHotPathBenchmark.calculateSettlement", "payments=2", "LedgerHotPathBenchmark.calculateSettlement", "payments=200"},
                 {"LedgerHotPathBenchmark.serialiseSettlementResponse", "", "LedgerHotPathBenchmark.calculateSettlement", "payments=2"},
         };
-        StringBuilder sb = new StringBuilder("A comparison counts only when the two 99.9 % intervals do not overlap; "
-                + "otherwise it is marked **inconclusive**.\n\n| A | B | Intervals | Verdict |\n| :--- | :--- | :--- | :--- |\n");
+        StringBuilder sb = new StringBuilder("A comparison counts only when the two 99.9 % intervals do not overlap **and** "
+                + "the difference between the two scores is larger than the spread between fork means of either benchmark. "
+                + "JMH's interval treats all 30 iterations as independent; when forks of the same benchmark disagree "
+                + "more than the two benchmarks do, the difference is between JVMs, not between the methods. Otherwise the "
+                + "comparison is marked **inconclusive**.\n\n| A | B | Intervals | Fork-mean spread (A, B) | Verdict |\n"
+                + "| :--- | :--- | :--- | :--- | :--- |\n");
         for (String[] p : pairs) {
             Result a = find(rs, p[0], p[1]), b = find(rs, p[2], p[3]);
             if (a == null || b == null) continue;
             sb.append("| `").append(short_(a)).append("` | `").append(short_(b)).append("` | [").append(sig(a.lo)).append(", ")
                     .append(sig(a.hi)).append("] vs [").append(sig(b.lo)).append(", ").append(sig(b.hi)).append("] ").append(a.unit)
+                    .append(" | ").append(sig(forkRange(a))).append(", ").append(sig(forkRange(b)))
                     .append(" | ").append(overlap(a, b) ? "**inconclusive** (intervals overlap)"
+                            : Math.max(forkRange(a), forkRange(b)) >= Math.abs(a.score - b.score)
+                            ? "**inconclusive** (forks disagree more than the two benchmarks differ)"
                             : a.score >= b.score ? "different: A takes " + sig(a.score / b.score) + "× as long as B"
                             : "different: B takes " + sig(b.score / a.score) + "× as long as A").append(" |\n");
         }
         return sb.toString();
     }
 
-    /** Fork-to-fork spread (why forks matter) and drift inside each fork (whether warm-up was long enough). */
+    static double forkRange(Result r) {
+        DoubleSummaryStatistics st = r.raw.stream().mapToDouble(f -> f.stream().mapToDouble(x -> x).average().orElse(0))
+                .summaryStatistics();
+        return st.getMax() - st.getMin();
+    }
+
+    /**
+     * Was the warm-up long enough? Two tests, both from this run:
+     * - the first warm-up iteration of each fork (from the console) against the measured score: if the JIT were
+     *   still working, early iterations would be clearly slower;
+     * - the drift inside each fork (last three measured iterations minus first three): unfinished warm-up makes
+     *   every fork get faster; drift with mixed signs is iteration-to-iteration noise.
+     */
     static String steadiness(List<Result> rs) {
-        StringBuilder sb = new StringBuilder("Per benchmark: the mean of each fork, and the largest drift inside any fork "
-                + "between its first three and last three measured iterations. Drift smaller than the error means the "
-                + "iterations had settled when measurement began.\n\n"
-                + "| Benchmark | Fork means | Fork spread | Largest drift in a fork | Error | Settled? |\n| :--- | :--- | ---: | ---: | ---: | :--- |\n");
+        Map<String, List<Double>> firstWarmup = firstWarmupIterations();
+        StringBuilder sb = new StringBuilder("| Benchmark | Fork means | Fork spread | First warm-up iteration, each fork "
+                + "(% of score) | Drift in each fork, last 3 vs first 3 measured | Reading |\n"
+                + "| :--- | :--- | ---: | :--- | :--- | :--- |\n");
         for (Result r : rs) {
             List<Double> means = r.raw.stream().map(f -> f.stream().mapToDouble(x -> x).average().orElse(Double.NaN)).toList();
-            double spread = means.stream().mapToDouble(x -> x).max().orElse(0) - means.stream().mapToDouble(x -> x).min().orElse(0);
-            double drift = 0;
+            List<Double> drifts = new ArrayList<>();
             for (List<Double> f : r.raw) {
                 if (f.size() < 6) continue;
                 double early = f.subList(0, 3).stream().mapToDouble(x -> x).average().orElse(0);
                 double late = f.subList(f.size() - 3, f.size()).stream().mapToDouble(x -> x).average().orElse(0);
-                drift = Math.max(drift, Math.abs(late - early));
+                drifts.add(late - early);
             }
+            boolean allFaster = !drifts.isEmpty() && drifts.stream().allMatch(x -> x < -r.error);
+            boolean allSlower = !drifts.isEmpty() && drifts.stream().allMatch(x -> x > r.error);
+            String reading = allFaster ? "**every fork still getting faster: warm-up too short**"
+                    : allSlower ? "**every fork slowing down: machine load or temperature**"
+                    : "no common trend: iteration-to-iteration noise";
+            List<Double> warm = firstWarmup.getOrDefault(r.label(), List.of());
             sb.append("| `").append(r.label()).append("` | ").append(means.stream().map(BenchLab::sig).collect(Collectors.joining(", ")))
-                    .append(" | ").append(pct(spread, r.score)).append(" | ").append(pct(drift, r.score)).append(" | ")
-                    .append(pct(r.error, r.score)).append(" | ").append(drift <= r.error ? "yes" : "**no: drift exceeds the error**")
-                    .append(" |\n");
+                    .append(" | ").append(pct(forkRange(r), r.score)).append(" | ")
+                    .append(warm.isEmpty() ? "n/a" : warm.stream().allMatch(w -> Double.isNaN(w) || w < 0.01)
+                            ? "too small for the console's 3 decimals" : warm.stream().map(w -> Double.isNaN(w) || w < 0.01 ? "too small to print"
+                            : String.format(Locale.ROOT, "%.0f %%", 100 * w / r.score)).collect(Collectors.joining(", ")))
+                    .append(" | ").append(drifts.stream().map(x -> String.format(Locale.ROOT, "%+.1f %%", 100 * x / r.score))
+                            .collect(Collectors.joining(", ")))
+                    .append(" | ").append(reading).append(" |\n");
         }
         return sb.toString();
+    }
+
+    /** "# Warmup Iteration   1: 0.044 us/op" for each benchmark and fork, read from benchmarks/results-console.txt. */
+    static Map<String, List<Double>> firstWarmupIterations() {
+        Map<String, List<Double>> out = new HashMap<>();
+        if (!Files.exists(CONSOLE)) return out;
+        try {
+            String bench = null, params = "";
+            for (String line : Files.readAllLines(CONSOLE, StandardCharsets.UTF_8)) {
+                if (line.startsWith("# Benchmark: ")) {
+                    bench = line.substring(13).strip().replace(PREFIX, "");
+                    params = "";
+                } else if (line.startsWith("# Parameters: ")) {
+                    Matcher m = Pattern.compile("payments = (\\d+)").matcher(line);
+                    params = m.find() ? "payments=" + m.group(1) : "";
+                } else if (bench != null && line.matches("# Warmup Iteration\\s+1: .*")) {
+                    String v = line.replaceFirst("# Warmup Iteration\\s+1:\\s*", "").replace(" us/op", "").strip();
+                    double value;
+                    try {
+                        value = Double.parseDouble(v);
+                    } catch (NumberFormatException tooSmallToPrint) {
+                        value = Double.NaN;
+                    }
+                    out.computeIfAbsent(bench + (params.isEmpty() ? "" : " (" + params + ")"), k -> new ArrayList<>()).add(value);
+                }
+            }
+        } catch (IOException ignored) {
+            // the table then shows n/a
+        }
+        return out;
     }
 
     static String verdictPhrase(Result a, Result b) {
