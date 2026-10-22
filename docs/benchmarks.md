@@ -43,6 +43,14 @@ Every number in this document comes from `benchmarks/results.json`, the raw JMH 
 ```
 
 <!-- BEGIN:dce -->
+| Benchmark | Time per operation | Allocated |
+| :--- | ---: | ---: |
+| `baseline`, empty method (JMH's loop only) | 0.0005733 ± 0.0000287 us/op | 0.0000004 ± 0.00000002 B/op |
+| `brokenDiscardsResult`, **broken**: result discarded | 0.0006247 ± 0.00003014 us/op | 0.0000004362 ± 0.00000002128 B/op |
+| `fixedReturnsResult`, fixed: result returned | 0.003886 ± 0.0003502 us/op | 0.000002713 ± 0.0000002445 B/op |
+| `fixedConsumesWithBlackhole`, fixed: result consumed by a Blackhole | 0.002705 ± 0.0008097 us/op | 0.00000189 ± 0.0000005652 B/op |
+
+The broken benchmark's interval overlaps the empty method's. Returning the result makes the measured time 6.22× the broken figure (0.003886 against 0.0006247 us/op), so the broken number understated the real cost by 83.92 %. The two fixes are distinguishable (their intervals do not overlap).
 <!-- END:dce -->
 
 **What the JIT removed.**
@@ -70,17 +78,67 @@ The broken benchmark stays in the code, named as broken, so the error can be rep
 **Why forks matter:** each fork is a fresh JVM, so one run's JIT decisions and the profile it built up cannot skew the others. The spread between fork means below shows how far a single JVM could mislead.
 
 <!-- BEGIN:steadiness -->
+Per benchmark: the mean of each fork, and the largest drift inside any fork between its first three and last three measured iterations. Drift smaller than the error means the iterations had settled when measurement began.
+
+| Benchmark | Fork means | Fork spread | Largest drift in a fork | Error | Settled? |
+| :--- | :--- | ---: | ---: | ---: | :--- |
+| `LedgerHotPathBenchmark.calculateSettlement (payments=2)` | 0.04368, 0.0443, 0.04433 | 1.5 % | 4.1 % | 2.8 % | **no: drift exceeds the error** |
+| `LedgerHotPathBenchmark.calculateSettlement (payments=200)` | 0.2358, 0.2282, 0.2307 | 3.2 % | 18.3 % | 6.9 % | **no: drift exceeds the error** |
+| `LedgerHotPathBenchmark.parseMerchantDirectory` | 1083, 1087, 1029 | 5.4 % | 8.7 % | 3.1 % | **no: drift exceeds the error** |
+| `LedgerHotPathBenchmark.serialiseSettlementResponse` | 0.37, 0.3859, 0.3764 | 4.2 % | 2.6 % | 2.3 % | **no: drift exceeds the error** |
+| `SettlementArithmeticBenchmark.baseline` | 0.0005321, 0.0005915, 0.0005962 | 11.2 % | 15.4 % | 5.0 % | **no: drift exceeds the error** |
+| `SettlementArithmeticBenchmark.brokenDiscardsResult` | 0.0005998, 0.0005944, 0.0006797 | 13.6 % | 5.2 % | 4.8 % | **no: drift exceeds the error** |
+| `SettlementArithmeticBenchmark.fixedConsumesWithBlackhole` | 0.001216, 0.003399, 0.003499 | 84.4 % | 19.7 % | 29.9 % | yes |
+| `SettlementArithmeticBenchmark.fixedReturnsResult` | 0.003855, 0.00364, 0.004161 | 13.4 % | 20.7 % | 9.0 % | **no: drift exceeds the error** |
 <!-- END:steadiness -->
 
 ## 5. Results
 <!-- BEGIN:environment -->
+From `results.json`: JMH 1.37, JDK 25.0.4 (Java HotSpot(TM) 64-Bit Server VM 25.0.4+7-LTS-189), machine `Windows 11 10.0 / Intel64 Family 6 Model 142 Stepping 12; GenuineIntel / 8 logical CPUs / 8006 MiB RAM`, 3 forks × 5 warm-up iterations of 10 s + 10 measured iterations of 10 s, 1 thread.
+
+```text
+Recorded 2026-10-22T15:05:31.112975700+01:00[Africa/Lagos]
+$ java -version
+java version "25.0.4" 2026-07-21 LTS
+Java(TM) SE Runtime Environment (build 25.0.4+7-LTS-189)
+Java HotSpot(TM) 64-Bit Server VM (build 25.0.4+7-LTS-189, mixed mode, sharing)
+$ mvnw -v
+Apache Maven 3.9.16 (2bdd9fddda4b155ebf8000e807eb73fd829a51d5)
+Maven home: C:\Users\PC\.m2\wrapper\dists\apache-maven-3.9.16\0daed3be3ebd1c706f0e69e8b07c6b73f5cc4ea3dfce72a8d0ec2e849ca2ddb0
+Java version: 25.0.4, vendor: Oracle Corporation, runtime: C:\Program Files\Java\jdk-25.0.4
+Default locale: en_US, platform encoding: UTF-8
+OS name: "windows 11", version: "10.0", arch: "amd64", family: "windows"
+Machine: Windows 11 10.0 / Intel64 Family 6 Model 142 Stepping 12; GenuineIntel / 8 logical CPUs / 8006 MiB RAM
+Suite wall-clock time: 60 min
+```
 <!-- END:environment -->
 
 <!-- BEGIN:results -->
+Score ± error is JMH's 99.9 % confidence interval over 3 forks × 10 measured iterations (30 samples). Allocation is `gc.alloc.rate.norm` from `-prof gc`, in the same run.
+
+| Benchmark | Time per operation | 99.9 % interval | Allocated per operation |
+| :--- | ---: | :--- | ---: |
+| `LedgerHotPathBenchmark.calculateSettlement (payments=2)` | 0.0441 ± 0.001224 us/op | [0.04288, 0.04533] | 200 ± 0.0000008597 B/op |
+| `LedgerHotPathBenchmark.calculateSettlement (payments=200)` | 0.2316 ± 0.01605 us/op | [0.2155, 0.2476] | 200 ± 0.00001121 B/op |
+| `LedgerHotPathBenchmark.parseMerchantDirectory` | 1067 ± 32.87 us/op | [1034, 1099] | 1170000 ± 0.02374 B/op |
+| `LedgerHotPathBenchmark.serialiseSettlementResponse` | 0.3774 ± 0.008708 us/op | [0.3687, 0.3861] | 592 ± 0.000006073 B/op |
+| `SettlementArithmeticBenchmark.baseline` | 0.0005733 ± 0.0000287 us/op | [0.0005446, 0.000602] | 0.0000004 ± 0.00000002 B/op |
+| `SettlementArithmeticBenchmark.brokenDiscardsResult` | 0.0006247 ± 0.00003014 us/op | [0.0005945, 0.0006548] | 0.0000004362 ± 0.00000002128 B/op |
+| `SettlementArithmeticBenchmark.fixedConsumesWithBlackhole` | 0.002705 ± 0.0008097 us/op | [0.001895, 0.003514] | 0.00000189 ± 0.0000005652 B/op |
+| `SettlementArithmeticBenchmark.fixedReturnsResult` | 0.003886 ± 0.0003502 us/op | [0.003535, 0.004236] | 0.000002713 ± 0.0000002445 B/op |
 <!-- END:results -->
 
 ## 6. Comparisons
 <!-- BEGIN:comparisons -->
+A comparison counts only when the two 99.9 % intervals do not overlap; otherwise it is marked **inconclusive**.
+
+| A | B | Intervals | Verdict |
+| :--- | :--- | :--- | :--- |
+| `brokenDiscardsResult` | `baseline` | [0.0005945, 0.0006548] vs [0.0005446, 0.000602] us/op | **inconclusive** (intervals overlap) |
+| `brokenDiscardsResult` | `fixedReturnsResult` | [0.0005945, 0.0006548] vs [0.003535, 0.004236] us/op | different: B takes 6.22× as long as A |
+| `fixedReturnsResult` | `fixedConsumesWithBlackhole` | [0.003535, 0.004236] vs [0.001895, 0.003514] us/op | different: A takes 1.437× as long as B |
+| `calculateSettlement (payments=2)` | `calculateSettlement (payments=200)` | [0.04288, 0.04533] vs [0.2155, 0.2476] us/op | different: B takes 5.251× as long as A |
+| `serialiseSettlementResponse` | `calculateSettlement (payments=2)` | [0.3687, 0.3861] vs [0.04288, 0.04533] us/op | different: A takes 8.558× as long as B |
 <!-- END:comparisons -->
 
 ## 7. Allocation, connected to the code

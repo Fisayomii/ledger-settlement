@@ -1,0 +1,13 @@
+Recorded 2026-10-22T15:05:31.112975700+01:00[Africa/Lagos]
+$ java -version
+java version "25.0.4" 2026-07-21 LTS
+Java(TM) SE Runtime Environment (build 25.0.4+7-LTS-189)
+Java HotSpot(TM) 64-Bit Server VM (build 25.0.4+7-LTS-189, mixed mode, sharing)
+$ mvnw -v
+Apache Maven 3.9.16 (2bdd9fddda4b155ebf8000e807eb73fd829a51d5)
+Maven home: C:\Users\PC\.m2\wrapper\dists\apache-maven-3.9.16\0daed3be3ebd1c706f0e69e8b07c6b73f5cc4ea3dfce72a8d0ec2e849ca2ddb0
+Java version: 25.0.4, vendor: Oracle Corporation, runtime: C:\Program Files\Java\jdk-25.0.4
+Default locale: en_US, platform encoding: UTF-8
+OS name: "windows 11", version: "10.0", arch: "amd64", family: "windows"
+Machine: Windows 11 10.0 / Intel64 Family 6 Model 142 Stepping 12; GenuineIntel / 8 logical CPUs / 8006 MiB RAM
+Suite wall-clock time: 60 min
