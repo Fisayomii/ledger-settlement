@@ -31,7 +31,7 @@ k6.exe v2.2.0 (commit/00a9a1b7f5, go1.26.5, windows/amd64)
 - **Steady state before the measured window:** each run cold-starts the service with `java -jar target/ledger-settlement.jar` and runs the same script for 2 minutes at the same rate (`-e PHASE=warmup`).
   - Only then does Flight Recorder start, via `jcmd` with the lab's options (`duration=10m`, `settings=profile`, the lab's file name), as the measured 10-minute k6 run begins.
   - The lab's command, `-XX:StartFlightRecording=…` at launch, records from JVM start-up, so its first minute would mix class loading and JIT compilation into the GC numbers.
-  - Steady state is confirmed by the per-minute table in each run's detail: allocation rate, collections and heap after GC stay level from the first measured minute to the last.
+  - Steady state is confirmed by the table of tenths in each run's detail. In the baseline, allocation stays between 6.19 and 6.22 MB/s and the heap after GC between 36.8 and 37.5 MB in every tenth of the 10 minutes, so nothing is still warming up or accumulating.
 - **Same environment for every run:** the same laptop and JDK, Postgres in Docker, the merchant-directory stub, and the cold start, warm-up and 10-minute window above. The only difference between baseline and tuned is the one change in section 5.
 
 ## 3. Baseline
@@ -129,7 +129,28 @@ Tenths of the recording (alloc MB/s, collections, longest pause ms, avg heap aft
 <!-- END:baseline-detail -->
 
 ## 4. Classification (written before any change)
-*To be written from the baseline numbers above and committed before the remedy.*
+**Classification: allocation-driven, and mild. It is not a pause problem.**
+
+**The pauses are not the problem.**
+- The longest pause is 16.54 ms as recorded, about 14 ms once JFR's clock is corrected.
+- All 107 pauses add up to 0.33 s, 0.05 % of the ten minutes.
+- p95 request latency is 2.78 ms and p99 is 5.36 ms, so a collection rarely reaches a request at all.
+- The heap after each collection is flat at 37 MB of a 2 GB maximum, and the committed heap stays under 100 MB. Nothing is retained, promoted or growing.
+- A pause problem, by the lab's definition, is modest allocation with long individual collections: pauses of tens or hundreds of milliseconds, with a latency tail that follows them. None of that is present.
+- So neither `-Xmx` nor a collector switch has anything to fix. The first submission's switch to ZGC bought shorter pauses that this service does not need, at a cost in throughput and memory.
+
+**What the collector does cost is frequency.**
+- There is a young collection about every 5.6 s.
+- That frequency is set entirely by the allocation rate: 6.20 MB/s, about 21 KB per request at 300 req/s. Allocate half as much per request and there are half as many collections.
+
+**Where the allocation comes from.**
+- No class dominates the profile: `byte[]` 14.5 %, `Object[]` 9.6 %, and nothing else above 3.2 %. This is not the textbook "few classes" picture.
+- Most of the allocation is the framework handling a request: Tomcat buffers, Spring MVC, Jackson.
+- One application call site, however, carries **37.5 % of everything the service allocates**: `SettlementService.calculateSettlement` line 29, `repository.findByMerchantId(merchantId)`.
+- Within that call, **45.4 % (17.0 % of all allocation)** is Hibernate creating `PaymentEntity` instances and registering them in the persistence context (`EntityInitializerImpl`, `StatefulPersistenceContext`, `EntityEntryContext`). Then come the JDBC driver (15.7 %), other Hibernate session work (14.2 %), query creation (13.7 %) and the transaction proxy (8.7 %). These are all in the baseline detail above.
+- The service builds a managed entity for every payment, with its dirty-checking snapshot, only to run `mapToLong(PaymentEntity::getAmountMinor).sum()` over the list and discard it.
+
+**So the remedy is a code change at that site, not a flag.** Section 5 asks the database for the count and the sum instead of the rows. That removes the entity loading and the persistence-context bookkeeping per request, and leaves the query, JDBC and transaction layers in place.
 
 ## 5. Remedy
 *Follows from section 4.*
