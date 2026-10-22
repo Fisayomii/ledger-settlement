@@ -66,19 +66,23 @@ public class GcLab {
                int gcCount, int youngCount, int otherCount, double longestPauseMs, double totalPauseMs,
                double phasePauseMaxMs, double heapAfterAvgMB, double heapAfterMaxMB, double committedMaxMB,
                double rssMaxMB, double cpuJvmPct, double rps, double p50, double p95, double p99, double failedPct,
-               long dropped, double startupSeconds, long amountMin, long amountMax, String collector) {
+               long dropped, double startupSeconds, long amountMin, long amountMax, String collector,
+               double carriedOverMB, double heapGrowthMBps, double jfrClockFactor, double machineCpuPct,
+               double machineCpuMaxPct) {
 
         static final String HEADER = "stage,run,recording_s,allocated_MB,alloc_MB_per_s,top_classes,gc_count,young_count,"
                 + "other_count,longest_pause_ms,total_pause_ms,phase_pause_max_ms,heap_after_gc_avg_MB,heap_after_gc_max_MB,"
                 + "heap_committed_max_MB,rss_max_MB,cpu_jvm_pct,throughput_req_per_s,p50_ms,p95_ms,p99_ms,failed_pct,"
-                + "dropped_iterations,startup_s,amount_min,amount_max,collector";
+                + "dropped_iterations,startup_s,amount_min,amount_max,collector,carried_over_MB,heap_growth_MB_per_s,jfr_clock_factor,"
+                + "machine_cpu_pct,machine_cpu_max_pct";
 
         String csv() {
             return String.format(Locale.ROOT, "%s,%d,%.1f,%.1f,%.2f,%s,%d,%d,%d,%.2f,%.1f,%.2f,%.1f,%.1f,%.1f,%.1f,%.1f,"
-                            + "%.2f,%.2f,%.2f,%.2f,%.3f,%d,%.1f,%d,%d,%s",
+                            + "%.2f,%.2f,%.2f,%.2f,%.3f,%d,%.1f,%d,%d,%s,%.1f,%.2f,%.3f,%.1f,%.1f",
                     stage, n, recordingSeconds, allocatedMB, allocMBps, topClasses, gcCount, youngCount, otherCount,
                     longestPauseMs, totalPauseMs, phasePauseMaxMs, heapAfterAvgMB, heapAfterMaxMB, committedMaxMB, rssMaxMB,
-                    cpuJvmPct, rps, p50, p95, p99, failedPct, dropped, startupSeconds, amountMin, amountMax, collector);
+                    cpuJvmPct, rps, p50, p95, p99, failedPct, dropped, startupSeconds, amountMin, amountMax, collector,
+                    carriedOverMB, heapGrowthMBps, jfrClockFactor, machineCpuPct, machineCpuMaxPct);
         }
 
         static Run parse(String line) {
@@ -86,7 +90,9 @@ public class GcLab {
             return new Run(f[0], Integer.parseInt(f[1]), d(f[2]), d(f[3]), d(f[4]), f[5], Integer.parseInt(f[6]),
                     Integer.parseInt(f[7]), Integer.parseInt(f[8]), d(f[9]), d(f[10]), d(f[11]), d(f[12]), d(f[13]),
                     d(f[14]), d(f[15]), d(f[16]), d(f[17]), d(f[18]), d(f[19]), d(f[20]), d(f[21]), Long.parseLong(f[22]),
-                    d(f[23]), Long.parseLong(f[24]), Long.parseLong(f[25]), f[26]);
+                    d(f[23]), Long.parseLong(f[24]), Long.parseLong(f[25]), f[26],
+                    f.length > 27 ? d(f[27]) : 0, f.length > 28 ? d(f[28]) : 0, f.length > 29 ? d(f[29]) : 1,
+                    f.length > 30 ? d(f[30]) : -1, f.length > 31 ? d(f[31]) : -1);
         }
 
         private static double d(String s) {
@@ -111,8 +117,8 @@ public class GcLab {
 
     public static void main(String[] args) throws Exception {
         try {
-            if (args.length != 1 || !List.of("baseline", "compare").contains(args[0])) {
-                fail("Usage: java perf/GcLab.java baseline   (phase 1)   |   java perf/GcLab.java compare   (phase 2)");
+            if (args.length != 1 || !List.of("baseline", "compare", "reanalyse").contains(args[0])) {
+                fail("Usage: java perf/GcLab.java baseline (phase 1) | compare (phase 2) | reanalyse (recompute from the .jfr files)");
             }
             runLab(args[0]);
         } catch (LabFailure e) {
@@ -126,6 +132,10 @@ public class GcLab {
             fail("Run this from the repository root on branch feature/gc-tuning: java perf/GcLab.java " + mode);
         }
         if (Runtime.version().feature() < 25) fail("Run with JDK 25 (found " + Runtime.version() + ").");
+        if (mode.equals("reanalyse")) {
+            reanalyse();
+            return;
+        }
         keepWindowsAwake();
         Path javaBin = Path.of(System.getProperty("java.home"), "bin");
         String java = exe(javaBin, "java"), jcmd = exe(javaBin, "jcmd"), jfr = exe(javaBin, "jfr");
@@ -162,9 +172,15 @@ public class GcLab {
             for (int i = 0; i < plan.size(); i++) {
                 Stage s = plan.get(i);
                 int n = runNumbers.get(i);
+                if (alreadyRecorded(s.name, n)) {
+                    System.out.printf("%n--- %s-%d already recorded (perf/results/sjv-l2-runs.csv and its .jfr); skipped%n", s.name, n);
+                    continue;
+                }
                 for (int attempt = 1; ; attempt++) {
                     try {
-                        runs.add(measure(s, n, trees.get(s.name), java, jcmd, jfr));
+                        Run done = measure(s, n, trees.get(s.name), java, jcmd, jfr);
+                        runs.add(done);
+                        saveRuns(List.of(done));
                         break;
                     } catch (MachineStall stall) {
                         String id = s.name + "-" + n;
@@ -254,12 +270,10 @@ public class GcLab {
             check(run(ROOT, RUNS.resolve(id + ".k6.txt"), k6), "k6 run");
             double k6Seconds = (System.nanoTime() - k0) / 1e9;
 
-            // duration=10m ends the recording by itself and only then writes the file: wait for that moment.
-            while (System.nanoTime() - recordingStarted < Duration.ofSeconds(603).toNanos()) Thread.sleep(500);
-            long deadline = System.nanoTime() + Duration.ofSeconds(60).toNanos();
-            while (!Files.exists(jfrInTree) && System.nanoTime() < deadline) Thread.sleep(500);
-            if (!Files.exists(jfrInTree)) fail("Flight Recorder did not write " + jfrName + " - see " + id + ".jcmd.txt");
-            Thread.sleep(3000);
+            // duration=10m ends the recording by itself; the file is complete only once JFR reports the recording gone
+            // and the file has stopped growing.
+            while (System.nanoTime() - recordingStarted < Duration.ofSeconds(602).toNanos()) Thread.sleep(500);
+            waitForRecordingWritten(jcmd, app.pid(), jfrInTree, id);
             if (k6Seconds > STEADY_STALL_SECONDS) throw new MachineStall("k6 took " + Math.round(k6Seconds) + " s for the 10-minute profile");
 
             Path jfrFile = ROOT.resolve(jfrName);
@@ -275,53 +289,105 @@ public class GcLab {
         }
     }
 
+    static void waitForRecordingWritten(String jcmd, long pid, Path file, String id) throws Exception {
+        long deadline = System.nanoTime() + Duration.ofSeconds(120).toNanos();
+        long lastSize = -1;
+        int stable = 0;
+        while (System.nanoTime() < deadline) {
+            String check = capture(null, jcmd, String.valueOf(pid), "JFR.check", "name=gc");
+            boolean running = check.contains("running") || check.contains("delayed");
+            long size = Files.exists(file) ? Files.size(file) : 0;
+            stable = (!running && size > 0 && size == lastSize) ? stable + 1 : 0;
+            if (stable >= 3) return;
+            lastSize = size;
+            Thread.sleep(1000);
+        }
+        run(ROOT, RUNS.resolve(id + ".jcmd-stop.txt"), List.of(jcmd, String.valueOf(pid), "JFR.stop", "name=gc"));
+        Thread.sleep(5000);
+        if (!Files.exists(file) || Files.size(file) == 0) fail("Flight Recorder did not finish writing " + file.getFileName());
+    }
+
     static List<String> displayCommand(List<String> cmd) {
         List<String> out = new ArrayList<>(cmd);
         out.set(0, "java");
         return out;
     }
 
-    static Run analyse(Stage stage, int n, double startup, Path k6Summary, Path jfrFile, String jfr) throws Exception {
-        String id = stage.name + "-" + n;
+    /** Figures read from one recording. */
+    record JfrMetrics(double seconds, double allocatedMB, double carriedOverMB, String topClasses, int gcCount, int young,
+                      int other, double longestMs, double totalPauseMs, double phaseMaxMs, double heapAfterAvgMB,
+                      double heapAfterMaxMB, double committedMaxMB, double rssMaxMB, double cpuJvmPct, String collector,
+                      double heapGrowthMB, double clockFactor, double machineCpuPct, double machineCpuMaxPct) {}
+
+    /**
+     * Reads one recording with the jdk.jfr.consumer API.
+     * - Length: the recording's own duration (jdk.ActiveRecording, as `jfr summary` shows), in real seconds.
+     * - Allocation: jdk.ObjectAllocationSample weights. A sample's weight is everything its thread allocated since
+     *   that thread's previous sample, so each thread's first sample in the recording also carries what it allocated
+     *   before the recording started (start-up and warm-up). Those first samples are left out and reported separately.
+     * - Cross-check: heap growth between consecutive collections (GCHeapSummary before GC n minus after GC n-1).
+     * - JFR clock: one jdk.CPULoad sample per second; if their timestamps span more or less time than the recording
+     *   lasted, JFR's tick clock runs fast or slow on this machine, and every JFR duration is off by that factor.
+     */
+    static JfrMetrics analyseJfr(String id, Path jfrFile, String jfr) throws Exception {
         capture(RUNS.resolve(id + ".jfr-summary.txt"), jfr, "summary", jfrFile.toString());
         String gcPrint = capture(null, jfr, "print", "--events", "jdk.GarbageCollection", jfrFile.toString());
         Files.writeString(RUNS.resolve(id + ".gc-events.txt"), gcPrint);
         int printedCollections = gcPrint.split("jdk\\.GarbageCollection \\{", -1).length - 1;
 
-        List<RecordedEvent> events = RecordingFile.readAllEvents(jfrFile);
-        Instant first = events.stream().map(RecordedEvent::getStartTime).min(Comparator.naturalOrder()).orElseThrow();
+        List<RecordedEvent> events = new ArrayList<>(RecordingFile.readAllEvents(jfrFile));
+        events.sort(Comparator.comparing(RecordedEvent::getStartTime));
+        Instant first = events.stream().map(RecordedEvent::getEndTime).min(Comparator.naturalOrder()).orElseThrow();
         Instant last = events.stream().map(RecordedEvent::getEndTime).max(Comparator.naturalOrder()).orElseThrow();
-        double seconds = Duration.between(first, last).toMillis() / 1000.0;
+        double tickSeconds = Duration.between(first, last).toMillis() / 1000.0;
+        double seconds = events.stream().filter(e -> e.getEventType().getName().equals("jdk.ActiveRecording"))
+                .map(e -> e.getDuration("recordingDuration")).filter(d -> d != null && !d.isZero() && !d.isNegative())
+                .mapToDouble(d -> d.toMillis() / 1000.0).min().orElse(tickSeconds);
+        seconds = Math.min(seconds, tickSeconds * 2);
+        long cpuSamples = events.stream().filter(e -> e.getEventType().getName().equals("jdk.CPULoad")).count();
+        double clockFactor = tickSeconds / seconds; // jdk.CPULoad (one per second) is reported alongside as corroboration
 
-        Map<String, Long> byClass = new HashMap<>();
-        Map<String, Long> byTopFrame = new HashMap<>();
-        Map<String, Long> byAppFrame = new HashMap<>();
-        long[] perMinuteAlloc = new long[12];
-        int[] perMinuteGc = new int[12];
-        double[] perMinuteMaxPause = new double[12];
-        List<List<Double>> perMinuteHeap = new ArrayList<>();
-        for (int i = 0; i < 12; i++) perMinuteHeap.add(new ArrayList<>());
-        long allocated = 0;
-        int gcCount = 0, young = 0, other = 0;
-        double longest = 0, totalPause = 0, phaseMax = 0, cpuSum = 0, rssMax = 0, committedMax = 0;
-        int cpuSamples = 0;
+        final int bins = 10;
+        Map<String, Long> byClass = new HashMap<>(), byTopFrame = new HashMap<>(), byAppFrame = new HashMap<>();
+        Map<String, Map<String, Long>> appFrameByLayer = new TreeMap<>();
+        long[] binAlloc = new long[bins];
+        int[] binGc = new int[bins];
+        double[] binMaxPause = new double[bins];
+        List<List<Double>> binHeap = new ArrayList<>();
+        for (int i = 0; i < bins; i++) binHeap.add(new ArrayList<>());
+        Set<Long> threadsSeen = new HashSet<>();
+        Map<Long, Long> beforeGc = new HashMap<>(), afterGc = new HashMap<>();
+        long allocated = 0, carried = 0;
+        int gcCount = 0, young = 0, other = 0, cpuN = 0;
+        double longest = 0, totalPause = 0, phaseMax = 0, cpuSum = 0, rssMax = 0, committedMax = 0, machineSum = 0, machineMax = 0;
         List<Double> heapAfter = new ArrayList<>();
         Set<String> collectors = new TreeSet<>();
 
         for (RecordedEvent e : events) {
-            int minute = (int) Math.min(11, Duration.between(first, e.getStartTime()).toSeconds() / 60);
+            int bin = (int) Math.max(0, Math.min(bins - 1,
+                    Duration.between(first, e.getEndTime()).toMillis() / 1000.0 / tickSeconds * bins));
             switch (e.getEventType().getName()) {
                 case "jdk.ObjectAllocationSample" -> {
                     long w = e.getLong("weight");
+                    var thread = e.getThread("eventThread");
+                    if (thread != null && threadsSeen.add(thread.getJavaThreadId())) {
+                        carried += w;
+                        continue;
+                    }
                     allocated += w;
-                    perMinuteAlloc[minute] += w;
+                    binAlloc[bin] += w;
                     byClass.merge(prettyClass(e.getClass("objectClass").getName()), w, Long::sum);
                     if (e.getStackTrace() != null && !e.getStackTrace().getFrames().isEmpty()) {
                         List<RecordedFrame> frames = e.getStackTrace().getFrames();
                         byTopFrame.merge(frameName(frames.getFirst()), w, Long::sum);
-                        frames.stream().filter(f -> f.getMethod().getType().getName().startsWith("javatesa6."))
-                                .findFirst().ifPresentOrElse(f -> byAppFrame.merge(frameName(f), w, Long::sum),
-                                        () -> byAppFrame.merge("(no application frame on the stack)", w, Long::sum));
+                        var appFrame = frames.stream().filter(f -> f.getMethod().getType().getName().startsWith("javatesa6.")).findFirst();
+                        if (appFrame.isPresent()) {
+                            String site = frameName(appFrame.get());
+                            byAppFrame.merge(site, w, Long::sum);
+                            appFrameByLayer.computeIfAbsent(site, k -> new HashMap<>()).merge(layer(frames), w, Long::sum);
+                        } else {
+                            byAppFrame.merge("(no application frame on the stack)", w, Long::sum);
+                        }
                     }
                 }
                 case "jdk.GarbageCollection" -> {
@@ -331,47 +397,118 @@ public class GcLab {
                     double p = e.getDuration("longestPause").toNanos() / 1e6;
                     longest = Math.max(longest, p);
                     totalPause += e.getDuration("sumOfPauses").toNanos() / 1e6;
-                    perMinuteGc[minute]++;
-                    perMinuteMaxPause[minute] = Math.max(perMinuteMaxPause[minute], p);
+                    binGc[bin]++;
+                    binMaxPause[bin] = Math.max(binMaxPause[bin], p);
                 }
                 case "jdk.GCPhasePause" -> phaseMax = Math.max(phaseMax, e.getDuration().toNanos() / 1e6);
                 case "jdk.GCHeapSummary" -> {
+                    long used = e.getLong("heapUsed");
                     if ("After GC".equals(e.getString("when"))) {
-                        double mb = e.getLong("heapUsed") / 1e6;
-                        heapAfter.add(mb);
-                        perMinuteHeap.get(minute).add(mb);
+                        heapAfter.add(used / 1e6);
+                        binHeap.get(bin).add(used / 1e6);
+                        afterGc.put(e.getLong("gcId"), used);
+                    } else {
+                        beforeGc.put(e.getLong("gcId"), used);
                     }
                     RecordedObject space = e.getValue("heapSpace");
                     if (space != null) committedMax = Math.max(committedMax, space.getLong("committedSize") / 1e6);
                 }
                 case "jdk.CPULoad" -> {
+                    machineSum += e.getFloat("machineTotal");
+                    machineMax = Math.max(machineMax, e.getFloat("machineTotal"));
                     cpuSum += e.getFloat("jvmUser") + e.getFloat("jvmSystem");
-                    cpuSamples++;
+                    cpuN++;
                 }
                 case "jdk.ResidentSetSize" -> rssMax = Math.max(rssMax, e.getLong("size") / 1e6);
                 case "jdk.GCConfiguration" -> collectors.add(e.getString("youngCollector") + "/" + e.getString("oldCollector"));
                 default -> { }
             }
         }
+        long heapGrowth = 0;
+        List<Long> ids = new ArrayList<>(beforeGc.keySet());
+        Collections.sort(ids);
+        for (int i = 1; i < ids.size(); i++) {
+            Long prevAfter = afterGc.get(ids.get(i - 1));
+            if (prevAfter != null) heapGrowth += Math.max(0, beforeGc.get(ids.get(i)) - prevAfter);
+        }
         if (printedCollections != gcCount) {
             System.out.printf("NOTE: jfr print shows %d collections, the event API %d%n", printedCollections, gcCount);
         }
 
-        String topClasses = top(byClass, allocated, 5);
-        StringBuilder detail = new StringBuilder();
-        detail.append("Recording ").append(fmt(seconds, 1)).append(" s, ").append(fmt(allocated / 1e6, 1))
-                .append(" MB sampled allocation (jdk.ObjectAllocationSample weights)\n\nTop allocating classes:\n")
-                .append(topList(byClass, allocated, 10)).append("\nTop allocation sites (frame where the object was created):\n")
-                .append(topList(byTopFrame, allocated, 15)).append("\nFirst application frame on the allocating stack:\n")
-                .append(topList(byAppFrame, allocated, 10)).append("\nPer minute (minute: alloc MB/s, collections, longest pause ms, avg heap after GC MB):\n");
-        for (int m = 0; m < 11; m++) {
-            if (perMinuteAlloc[m] == 0 && perMinuteGc[m] == 0) continue;
-            detail.append(String.format(Locale.ROOT, "%2d: %.2f MB/s, %d GCs, %.2f ms, %.1f MB%n", m + 1,
-                    perMinuteAlloc[m] / 1e6 / 60, perMinuteGc[m], perMinuteMaxPause[m],
-                    perMinuteHeap.get(m).stream().mapToDouble(x -> x).average().orElse(0)));
+        StringBuilder d = new StringBuilder();
+        d.append(String.format(Locale.ROOT, "Recording %.0f s (jfr summary). Allocation %.1f MB = %.2f MB/s; each thread's first sample "
+                        + "(%.1f MB, allocated before the recording started) is left out.%n", seconds, allocated / 1e6,
+                allocated / 1e6 / seconds, carried / 1e6));
+        d.append(String.format(Locale.ROOT, "Cross-check: heap growth between consecutive collections %.1f MB = %.2f MB/s.%n",
+                heapGrowth / 1e6, heapGrowth / 1e6 / seconds));
+        d.append(String.format(Locale.ROOT, "Whole machine CPU (all processes, jdk.CPULoad machineTotal): average %.1f %%, highest %.1f %%; "
+                + "this JVM: %.1f %%.%n", cpuN == 0 ? 0 : 100 * machineSum / cpuN, 100 * machineMax, cpuN == 0 ? 0 : 100 * cpuSum / cpuN));
+        d.append(String.format(Locale.ROOT, "JFR clock: the %.0f s recording spans %.0f s of JFR time (%d one-per-second jdk.CPULoad "
+                + "samples), factor %.3f (1.000 = accurate; JFR durations below are as recorded).%n%n", seconds, tickSeconds,
+                cpuSamples, clockFactor));
+        d.append("Top allocating classes:\n").append(topList(byClass, allocated, 10))
+                .append("\nTop allocation sites (frame where the object was created):\n").append(topList(byTopFrame, allocated, 15))
+                .append("\nFirst application frame on the allocating stack:\n").append(topList(byAppFrame, allocated, 8))
+                .append(layers(appFrameByLayer, byAppFrame, allocated))
+                .append("\nTenths of the recording (alloc MB/s, collections, longest pause ms, avg heap after GC MB):\n");
+        for (int b = 0; b < bins; b++) {
+            d.append(String.format(Locale.ROOT, "%2d: %.2f MB/s, %d GCs, %.2f ms, %.1f MB%n", b + 1,
+                    binAlloc[b] / 1e6 / (seconds / bins), binGc[b], binMaxPause[b],
+                    binHeap.get(b).stream().mapToDouble(x -> x).average().orElse(0)));
         }
-        Files.writeString(RUNS.resolve(id + ".gc-analysis.txt"), detail.toString());
+        Files.writeString(RUNS.resolve(id + ".gc-analysis.txt"), d.toString());
+        System.out.print(d);
 
+        return new JfrMetrics(seconds, allocated / 1e6, carried / 1e6, top(byClass, allocated, 5), gcCount, young, other,
+                longest, totalPause, phaseMax, avg(heapAfter), heapAfter.stream().mapToDouble(x -> x).max().orElse(0),
+                committedMax, rssMax, cpuN == 0 ? 0 : 100 * cpuSum / cpuN, String.join(" ", collectors),
+                heapGrowth / 1e6, clockFactor, cpuN == 0 ? 0 : 100 * machineSum / cpuN, 100 * machineMax);
+    }
+
+    /** Which layer below an application call did the allocating: the frames between the allocation and the call. */
+    static String layer(List<RecordedFrame> frames) {
+        StringBuilder sb = new StringBuilder();
+        for (RecordedFrame f : frames) {
+            String t = f.getMethod().getType().getName();
+            if (t.startsWith("javatesa6.")) break;
+            sb.append(t).append('.').append(f.getMethod().getName()).append(' ');
+        }
+        String s = sb.toString();
+        if (s.contains("EntityInitializerImpl") || s.contains("StatefulPersistenceContext") || s.contains("EntityEntryContext")
+                || s.contains("StandardRowReader") || s.contains("ListResultsConsumer.read")) return "Hibernate entity loading and persistence context";
+        if (s.contains("org.postgresql.")) return "JDBC driver (PgJDBC)";
+        if (s.contains("com.zaxxer.hikari.")) return "Hikari connection checkout";
+        if (s.contains("SqmQueryImpl.<init>") || s.contains("createQuery") || s.contains("buildTupleMetadata")
+                || s.contains("ParameterBinder") || s.contains("bind")) return "query creation and parameter binding";
+        if (s.contains("org.hibernate.")) return "other Hibernate (session, JDBC coordination)";
+        if (s.contains("org.springframework.transaction.") || s.contains("org.springframework.data.")) return "Spring transaction and repository proxy";
+        return "other";
+    }
+
+    static String layers(Map<String, Map<String, Long>> bySite, Map<String, Long> siteTotals, long allocated) {
+        StringBuilder sb = new StringBuilder();
+        siteTotals.entrySet().stream().filter(e -> bySite.containsKey(e.getKey()))
+                .filter(e -> e.getValue() >= 0.05 * allocated).sorted(Map.Entry.<String, Long>comparingByValue().reversed())
+                .forEach(site -> {
+                    sb.append("\nWhat ").append(site.getKey()).append(" allocated, by layer (share of that call, share of all):\n");
+                    bySite.get(site.getKey()).entrySet().stream().sorted(Map.Entry.<String, Long>comparingByValue().reversed())
+                            .forEach(l -> sb.append(String.format(Locale.ROOT, "  %5.1f %%  %5.1f %%  %s%n",
+                                    100.0 * l.getValue() / site.getValue(), 100.0 * l.getValue() / allocated, l.getKey())));
+                });
+        return sb.toString();
+    }
+
+    static Run withJfr(String stage, int n, JfrMetrics m, double rps, double p50, double p95, double p99, double failedPct,
+                       long dropped, double startup, long amountMin, long amountMax) {
+        return new Run(stage, n, m.seconds, m.allocatedMB, m.allocatedMB / m.seconds, m.topClasses, m.gcCount, m.young,
+                m.other, m.longestMs, m.totalPauseMs, m.phaseMaxMs, m.heapAfterAvgMB, m.heapAfterMaxMB, m.committedMaxMB,
+                m.rssMaxMB, m.cpuJvmPct, rps, p50, p95, p99, failedPct, dropped, startup, amountMin, amountMax,
+                m.collector, m.carriedOverMB, m.heapGrowthMB / m.seconds, m.clockFactor, m.machineCpuPct, m.machineCpuMaxPct);
+    }
+
+    static Run analyse(Stage stage, int n, double startup, Path k6Summary, Path jfrFile, String jfr) throws Exception {
+        String id = stage.name + "-" + n;
+        JfrMetrics m = analyseJfr(id, jfrFile, jfr);
         Map<String, Object> metrics = asMap(asMap(Json.parse(Files.readString(k6Summary))).get("metrics"));
         Map<String, Object> reqs = metric(metrics, "http_reqs{phase:steady}");
         Map<String, Object> dur = metric(metrics, "http_req_duration{phase:steady}");
@@ -380,23 +517,52 @@ public class GcLab {
         double failedPct = 100.0 * (failed.containsKey("passes") ? num(failed, "passes")
                 / Math.max(1, num(failed, "passes") + num(failed, "fails")) : num(failed, "value"));
         long dropped = metrics.containsKey("dropped_iterations") ? (long) num(metric(metrics, "dropped_iterations"), "count") : 0;
-
-        Run r = new Run(stage.name, n, seconds, allocated / 1e6, allocated / 1e6 / seconds, topClasses, gcCount, young, other,
-                longest, totalPause, phaseMax, avg(heapAfter), heapAfter.stream().mapToDouble(x -> x).max().orElse(0),
-                committedMax, rssMax, cpuSamples == 0 ? 0 : 100 * cpuSum / cpuSamples, num(reqs, "rate"),
-                dur.containsKey("p(50)") ? num(dur, "p(50)") : num(dur, "med"), num(dur, "p(95)"), num(dur, "p(99)"),
-                failedPct, dropped, startup, Math.round(num(amount, "min")), Math.round(num(amount, "max")),
-                String.join(" ", collectors));
-        System.out.printf("recording %.0f s | alloc %.2f MB/s | %d GCs (%d young) | longest pause %.2f ms | "
-                        + "%.1f req/s, p99 %.2f ms, failed %.3f %%, dropped %d%n", r.recordingSeconds, r.allocMBps, r.gcCount,
-                r.youngCount, r.longestPauseMs, r.rps, r.p99, r.failedPct, r.dropped);
-        System.out.print(detail.substring(detail.indexOf("Top allocating classes:"), detail.indexOf("Top allocation sites")));
+        Run r = withJfr(stage.name, n, m, num(reqs, "rate"), dur.containsKey("p(50)") ? num(dur, "p(50)") : num(dur, "med"),
+                num(dur, "p(95)"), num(dur, "p(99)"), failedPct, dropped, startup, Math.round(num(amount, "min")),
+                Math.round(num(amount, "max")));
+        System.out.printf("=> %.2f MB/s | %d GCs (%d young) | longest pause %.2f ms | %.1f req/s, p99 %.2f ms, failed %.3f %%, "
+                + "dropped %d%n", r.allocMBps, r.gcCount, r.youngCount, r.longestPauseMs, r.rps, r.p99, r.failedPct, r.dropped);
         return r;
+    }
+
+    /** Recomputes every recorded run from its .jfr file; k6 and start-up figures are kept from the CSV. */
+    static void reanalyse() throws Exception {
+        if (!Files.exists(CSV)) fail("No " + ROOT.relativize(CSV) + " to reanalyse.");
+        String jfr = exe(Path.of(System.getProperty("java.home"), "bin"), "jfr");
+        Files.createDirectories(RUNS);
+        List<Run> again = new ArrayList<>();
+        for (String line : Files.readAllLines(CSV).stream().skip(1).filter(l -> !l.isBlank()).toList()) {
+            Run old = Run.parse(line);
+            Path file = jfrFileOf(old.stage, old.n);
+            if (!Files.exists(file)) {
+                System.out.println("Keeping " + old.stage + "-" + old.n + " as recorded (" + file.getFileName() + " not found).");
+                again.add(old);
+                continue;
+            }
+            System.out.println("\n--- reanalysing " + old.stage + "-" + old.n + " from " + ROOT.relativize(file));
+            JfrMetrics m = analyseJfr(old.stage + "-" + old.n, file, jfr);
+            again.add(withJfr(old.stage, old.n, m, old.rps, old.p50, old.p95, old.p99, old.failedPct, old.dropped,
+                    old.startupSeconds, old.amountMin, old.amountMax));
+        }
+        boolean tuned = again.stream().anyMatch(r -> r.stage.equals("tuned"));
+        writeOutputs(tuned ? "reanalyse-all" : "reanalyse-baseline", again, null);
     }
 
     // ---------------------------------------------------------------- outputs
 
-    static void writeOutputs(String mode, List<Run> newRuns, String toolchain) throws IOException {
+    static Path jfrFileOf(String stage, int n) {
+        String name = (stage.equals("baseline") ? "gc-baseline" : "gc-tuned") + (n == 1 ? "" : "-" + n) + ".jfr";
+        return n == 1 ? ROOT.resolve(name) : RUNS.resolve(name);
+    }
+
+    static boolean alreadyRecorded(String stage, int n) throws IOException {
+        if (!Files.exists(CSV) || !Files.exists(jfrFileOf(stage, n))) return false;
+        return Files.readAllLines(CSV).stream().skip(1).filter(l -> !l.isBlank()).map(Run::parse)
+                .anyMatch(r -> r.stage.equals(stage) && r.n == n);
+    }
+
+    /** Merges runs into perf/results/sjv-l2-runs.csv (a run with the same stage and number is replaced). */
+    static List<Run> saveRuns(List<Run> newRuns) throws IOException {
         Files.createDirectories(CSV.getParent());
         List<Run> all = new ArrayList<>();
         if (Files.exists(CSV)) {
@@ -406,11 +572,25 @@ public class GcLab {
         all.addAll(newRuns);
         all.sort(Comparator.comparing(Run::stage).thenComparingInt(Run::n));
         Files.writeString(CSV, Run.HEADER + "\n" + all.stream().map(Run::csv).collect(Collectors.joining("\n")) + "\n");
-        Files.writeString(WORK.resolve("commands-" + mode + ".txt"), String.join("\n", commandLog) + "\n");
+        return all;
+    }
+
+    static void writeOutputs(String mode, List<Run> newRuns, String toolchain) throws IOException {
+        List<Run> all = saveRuns(newRuns);
+        if (!commandLog.isEmpty()) Files.writeString(WORK.resolve("commands-" + mode + ".txt"), String.join("\n", commandLog) + "\n");
 
         Map<String, String> sections = new LinkedHashMap<>();
         Run b1 = all.stream().filter(r -> r.stage.equals("baseline") && r.n == 1).findFirst().orElseThrow();
-        if (mode.equals("baseline")) {
+        if (mode.startsWith("reanalyse")) {
+            sections.put("baseline-numbers", fourNumbers(b1, "gc-baseline.jfr"));
+            sections.put("baseline-detail", "```text\n" + Files.readString(RUNS.resolve("baseline-1.gc-analysis.txt")).strip() + "\n```");
+            if (mode.equals("reanalyse-all")) {
+                Run t1 = all.stream().filter(r -> r.stage.equals("tuned") && r.n == 1).findFirst().orElseThrow();
+                sections.put("tuned-numbers", fourNumbers(t1, "gc-tuned.jfr"));
+                sections.put("tuned-detail", "```text\n" + Files.readString(RUNS.resolve("tuned-1.gc-analysis.txt")).strip() + "\n```");
+                sections.put("comparison", comparison(all));
+            }
+        } else if (mode.equals("baseline")) {
             sections.put("starting-point", "```text\n" + toolchain.strip() + "\n```");
             sections.put("baseline-commands", "```text\n" + String.join("\n", commandLog) + "\n```");
             sections.put("baseline-numbers", fourNumbers(b1, "gc-baseline.jfr"));
@@ -448,20 +628,29 @@ public class GcLab {
     }
 
     static String fourNumbers(Run r, String file) {
+        String clock = Math.abs(r.jfrClockFactor - 1) < 0.03 ? ""
+                : " JFR's clock on this machine ran " + fmt(r.jfrClockFactor, 2) + "× fast (the " + fmt(r.recordingSeconds, 0)
+                + " s recording spans " + fmt(r.recordingSeconds * r.jfrClockFactor, 0) + " s of JFR timestamps), so every JFR duration, in JDK Mission Control "
+                + "too, reads " + fmt(r.jfrClockFactor, 2) + "× long: the real longest pause is about "
+                + fmt(r.longestPauseMs / r.jfrClockFactor, 1) + " ms. Both sides of any comparison carry the same factor.";
         return "From `" + file + "` (" + fmt(r.recordingSeconds, 0) + " s recording, collector " + r.collector + "):\n\n"
                 + "| Measure | Value | JDK Mission Control view |\n| :--- | ---: | :--- |\n"
                 + "| Total allocation rate | " + fmt(r.allocMBps, 2) + " MB/s (" + fmt(r.allocatedMB, 0) + " MB in "
-                + fmt(r.recordingSeconds, 0) + " s) | Memory → Allocation (total of `jdk.ObjectAllocationSample` weights) |\n"
+                + fmt(r.recordingSeconds, 0) + " s) | Memory → Allocation (sum of `jdk.ObjectAllocationSample` weights) |\n"
                 + "| Top three allocating classes | " + String.join("; ", Arrays.asList(r.topClasses.split(";")).subList(0,
                 Math.min(3, r.topClasses.split(";").length))) + " | Memory → Allocation → by class |\n"
                 + "| Collection count | " + r.gcCount + " (" + r.youngCount + " young, " + r.otherCount + " mixed/old) "
                 + "| Garbage Collections (one row per collection) |\n"
-                + "| Longest pause | " + fmt(r.longestPauseMs, 2) + " ms | Garbage Collections → Longest Pause column |\n\n"
-                + "Cross-check with the JDK's `jfr` tool: `jfr print --events jdk.GarbageCollection " + file + "` lists "
-                + r.gcCount + " collections, and the longest single `jdk.GCPhasePause` is " + fmt(r.phasePauseMaxMs, 2)
-                + " ms. Total pause time " + fmt(r.totalPauseMs, 1) + " ms (" + fmt(100 * r.totalPauseMs / 1000 / r.recordingSeconds, 3)
-                + " % of the run). Load during the same window (k6): " + fmt(r.rps, 1) + " req/s, p99 " + fmt(r.p99, 2)
-                + " ms, failed " + fmt(r.failedPct, 3) + " %, dropped iterations " + r.dropped + ".";
+                + "| Longest pause | " + fmt(r.longestPauseMs, 2) + " ms as recorded | Garbage Collections → Longest Pause column |\n\n"
+                + "**How the figures were checked.** The allocation total leaves out each thread's first sample ("
+                + fmt(r.carriedOverMB, 0) + " MB): a sample's weight is everything its thread allocated since its previous "
+                + "sample, so the first one also carries the start-up and warm-up. Independently, heap growth between "
+                + "consecutive collections gives " + fmt(r.heapGrowthMBps, 2) + " MB/s. `jfr print --events jdk.GarbageCollection "
+                + file + "` lists " + r.gcCount + " collections, and the longest single `jdk.GCPhasePause` is "
+                + fmt(r.phasePauseMaxMs, 2) + " ms. Total pause time " + fmt(r.totalPauseMs, 1) + " ms ("
+                + fmt(100 * r.totalPauseMs / 1000 / r.recordingSeconds, 3) + " % of the run)." + clock
+                + " Load in the same window (k6): " + fmt(r.rps, 1) + " req/s, p99 " + fmt(r.p99, 2) + " ms, failed "
+                + fmt(r.failedPct, 3) + " %, dropped iterations " + r.dropped + ".";
     }
 
     static String comparison(List<Run> all) {
@@ -474,13 +663,15 @@ public class GcLab {
         row(sb, "Collection count (10 min)", b, t, r -> r.gcCount, 0, false);
         row(sb, "Longest pause (ms)", b, t, Run::longestPauseMs, 2, false);
         row(sb, "p99 request latency (ms)", b, t, Run::p99, 2, false);
-        row(sb, "Throughput (req/s)", b, t, Run::rps, 1, true);
+        row(sb, "Throughput (req/s; held at 300 by the arrival rate)", b, t, Run::rps, 1, true);
+        row(sb, "Dropped iterations (rate not met)", b, t, r -> r.dropped, 0, false);
         row(sb, "Total GC pause time (ms)", b, t, Run::totalPauseMs, 1, false);
         row(sb, "p50 / p95 latency (ms)", b, t, Run::p95, 2, false);
         row(sb, "Heap after GC, average (MB)", b, t, Run::heapAfterAvgMB, 1, false);
         row(sb, "Heap committed, max (MB)", b, t, Run::committedMaxMB, 1, false);
         row(sb, "Resident set size, max (MB)", b, t, Run::rssMaxMB, 1, false);
         row(sb, "JVM CPU (% of machine)", b, t, Run::cpuJvmPct, 1, false);
+        row(sb, "Whole machine CPU, all processes (%)", b, t, Run::machineCpuPct, 1, false);
         row(sb, "Start-up until serving (s)", b, t, Run::startupSeconds, 1, false);
         row(sb, "Failed requests (%)", b, t, Run::failedPct, 3, false);
         sb.append("\n`amountOwedMinor` returned: baseline ").append(b.stream().mapToLong(Run::amountMin).min().orElse(-1))
