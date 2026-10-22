@@ -4,14 +4,12 @@ ledger:
     url: http://localhost:9090
 server:
   tomcat:
-    # Request-handling pool that serves /payments/settlement before SJV-L1.
-    # These are the Spring Boot defaults, written out so they can be found by file and line.
-    threads:
-      max: 200
-      min-spare: 10
     accept-count: 100
     max-connections: 8192
 spring:
+  threads:
+    virtual:
+      enabled: true   # Tomcat runs each request on its own virtual thread; set to false to roll back
   datasource:
     url: jdbc:postgresql://localhost:5433/ledger
     username: postgres

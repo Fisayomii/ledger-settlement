@@ -17,6 +17,8 @@ public class MerchantConfig {
 
     @Bean
     public MerchantLookup merchantLookup(MerchantDirectoryClient merchantDirectoryClient) {
-        return new MerchantLookup(merchantDirectoryClient);
+        MerchantLookup lookup = new MerchantLookup(merchantDirectoryClient);
+        lookup.table(); // load eagerly, on the startup thread, before the server takes traffic
+        return lookup;
     }
 }
