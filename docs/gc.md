@@ -188,6 +188,10 @@ long gross = totals.grossMinor();
 ### Commands, as executed
 <!-- BEGIN:tuned-commands -->
 ```text
+tuned-1 (in the gc-tuned build): java -jar target/ledger-settlement.jar
+tuned-1: k6 run -e PHASE=warmup perf/steady-load.js
+tuned-1: jcmd 12244 JFR.start name=gc duration=10m filename=gc-tuned.jfr settings=profile
+tuned-1: k6 run --summary-export target/sjv-l2/runs/tuned-1.k6-summary.json perf/steady-load.js
 baseline-2 (in the gc-baseline build): java -jar target/ledger-settlement.jar
 baseline-2: k6 run -e PHASE=warmup perf/steady-load.js
 baseline-2: jcmd 27952 JFR.start name=gc duration=10m filename=gc-baseline-2.jfr settings=profile
@@ -198,6 +202,8 @@ tuned-2: jcmd 4680 JFR.start name=gc duration=10m filename=gc-tuned-2.jfr settin
 tuned-2: k6 run --summary-export target/sjv-l2/runs/tuned-2.k6-summary.json perf/steady-load.js
 ```
 <!-- END:tuned-commands -->
+
+Tuned-1 ran in the session before baseline-2 and tuned-2; the runner resumed from the saved run, so its commands are copied here from that session's console output (pid 12244). Its outputs are under `phase2-compare/runs/tuned-1.*` in the raw zip.
 
 ### The four tuned numbers
 <!-- BEGIN:tuned-numbers -->
@@ -289,7 +295,7 @@ Each cell: mean of the runs, every run in brackets. Change counts only when it i
 | Collection count (10 min) | 124 (107, 140) | 86 (83, 89) | -30.4 % (better) |
 | Longest pause (ms) | 14.64 (16.54, 12.74) | 17.92 (14.93, 20.91) | +22.4 % (within noise) |
 | p99 request latency (ms) | 6.19 (5.36, 7.01) | 6.80 (6.75, 6.85) | +9.9 % (within noise) |
-| Throughput (req/s; held at 300 by the arrival rate) | 299.9 (299.9, 299.9) | 300.0 (300.0, 300.0) | +0.0 % (better) |
+| Throughput (req/s; held at 300 by the arrival rate) | 299.9 (299.9, 299.9) | 300.0 (300.0, 300.0) | +0.0 % (unchanged) |
 | Dropped iterations (rate not met) | 27 (53, 0) | 0 (0, 0) | -100.0 % (within noise) |
 | Total GC pause time (ms) | 546.2 (325.6, 766.8) | 483.7 (483.7, 483.7) | -11.4 % (within noise) |
 | p50 / p95 latency (ms) | 3.10 / 4.42 | 3.91 / 5.95 | +25.8 % (within noise) / +34.6 % (within noise) |
@@ -301,11 +307,41 @@ Each cell: mean of the runs, every run in brackets. Change counts only when it i
 | Start-up until serving (s) | 14.5 (12.5, 16.4) | 20.2 (16.9, 23.6) | +39.9 % (within noise) |
 | Failed requests (%) | 0.000 (0.000, 0.000) | 0.000 (0.000, 0.000) | n/a |
 
-`amountOwedMinor` returned: baseline 125438–125438, tuned 125438–125438. No run stalled.
+`amountOwedMinor` returned: baseline 125438–125438, tuned 125438–125438: the result is identical in every response of every run.
+
+**Runs set aside.**
+- Baseline-2 was set aside twice in the session after tuned-1: k6 needed 990 s and then 2 477 s for the 10-minute profile, because the laptop went into standby. Both attempts are kept under `phase2-compare/runs/discarded/` in the raw zip, and baseline-2 was repeated with standby disabled.
+- An earlier compare session was abandoned entirely. Its runs started 2× slower than in phase 1 and one recorded a 2.1 s "pause", which was the operating system starving the JVM, not garbage collection. None of its figures are used.
+
+**Reading the table.**
+- Allocation rate and collection count fall well outside the run-to-run spread: −17 % and −30 %.
+- Everything else, pauses, latency, memory, CPU and start-up, moves within the spread between runs of the same build, so no change is claimed for it.
+- Allocation per request is a property of the code and barely varies: 6.20 and 6.23 MB/s for the two baselines, 5.16 and 5.16 for the two tuned runs.
+- Latency, CPU and start-up depend on what else the laptop was doing. Whole-machine CPU ranged from 25 % to 47 % across runs, so those figures carry the machine's noise.
 <!-- END:comparison -->
 
 ## 7. The trade
-*Written from section 6.*
+**Regressions, named with their figures.**
+- **Throughput:** none. Both builds held 300 req/s with 0 dropped iterations in the tuned runs.
+- **Memory footprint:**
+  - Heap after GC rose from 35.7 to 37.4 MB (+4.8 %).
+  - Resident set size peaked at 368.8 against 351.9 MB (+4.8 %).
+  - Committed heap peaked at 96.5 against 88.6 MB.
+  - All three are within the spread between the two baseline runs. With fewer collections, a little more garbage sits in the heap between them.
+- **Start-up time:** 20.2 s against 14.5 s (+39.9 %), but the runs overlap: 16.9 and 23.6 s tuned, 12.5 and 16.4 s baseline. The change adds one `@Query` for Spring Data to parse at start-up, which is milliseconds, so the difference is not attributed to it.
+- **Latency:** p99 6.80 against 6.19 ms, and the longest pause 17.9 against 14.6 ms as recorded. Both are within noise.
+- **Code:** one JPQL aggregate to maintain instead of a derived query.
+
+**Why the trade is acceptable.** For the settlement read that every merchant dashboard polls, the service now does the same work with 17 % less allocation and 30 % fewer collections, and no measurable cost in latency, memory or throughput. The money arithmetic is untouched, on the same `long` minor units. The cost is one query that says exactly what the code needs, a merchant's count and sum, which is clearer than loading every payment to add it up.
+
+**When it would stop being acceptable.**
+- If settlement starts applying rules per payment, such as per-payment fees, refunds or currency conversion, a database sum no longer expresses the calculation. The rows, or a projection of the needed columns, would have to come back, and with them the allocation.
+- If this ever became a pause problem instead, for example with a much larger heap or long-lived caches, the next step would be a heap or collector change measured the same way, not more query tuning.
+
+**After release, watch:**
+- the young-collection rate (`jvm.gc.pause` count per minute), which should be about 30 % lower than before at equal traffic;
+- `/payments/settlement` p99 latency, which should be unchanged;
+- the settlement totals against the daily reconciliation.
 
 ## 8. Reproduce and evidence
 - **Phase 1:** `java perf/GcLab.java baseline` runs one baseline run.
@@ -313,3 +349,7 @@ Each cell: mean of the runs, every run in brackets. Change counts only when it i
 - **Prerequisites:** both need Postgres on `localhost:5433`, k6 on the PATH and JDK 25. Each run takes about 13 minutes.
 - **Deliverables:** `gc-baseline.jfr` and `gc-tuned.jfr` (repository root), `perf/steady-load.js` and this document.
 - **Raw outputs:** `perf/results/sjv-l2-raw.zip` holds, for every run, the k6 console output and summary JSON, the service log, `jfr summary`, `jfr print --events jdk.GarbageCollection`, and the allocation and per-minute analysis.
+  - `phase1-baseline/` holds baseline-1, including its first-pass analysis before the correction described in the git history.
+  - `phase2-compare/` holds tuned-1, baseline-2 and tuned-2, and the two set-aside attempts.
+- **Recompute:** `java perf/GcLab.java reanalyse` recomputes every figure from the `.jfr` files.
+- **Before a run on a laptop:** set the screen and sleep timeouts to Never while plugged in. On Modern Standby machines, a screen timeout puts the machine into standby whatever the runner requests.
